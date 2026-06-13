@@ -19,6 +19,7 @@ class _HomeScreenState extends State<HomeScreen> {
   final DatabaseService _db = DatabaseService();
   Map<int, TagDevice> _tags = {};
   Map<int, Map<String, dynamic>> _pecore = {};
+  Map<int, Map<String, dynamic>> _master = {};
   bool _isScanning = false;
   bool _bluetoothOn = true;
 
@@ -38,11 +39,16 @@ class _HomeScreenState extends State<HomeScreen> {
 
     _scanner.tagsStream.listen((tags) {
       setState(() => _tags = tags);
-      _aggiornaPecore(tags.keys.toList());
+      _aggiornaDati(tags.keys.toList());
     });
 
-    _caricaPecoreAssociate();
+    _caricaTuttiDati();
     _requestAndScan();
+  }
+
+  Future<void> _caricaTuttiDati() async {
+    await _caricaPecoreAssociate();
+    await _caricaMasterAssociati();
   }
 
   Future<void> _caricaPecoreAssociate() async {
@@ -54,19 +60,36 @@ class _HomeScreenState extends State<HomeScreen> {
     setState(() => _pecore = mappa);
   }
 
-  Future<void> _aggiornaPecore(List<int> tagIds) async {
+  Future<void> _caricaMasterAssociati() async {
+    final master = await _db.getMaster();
+    final mappa = <int, Map<String, dynamic>>{};
+    for (final m in master) {
+      mappa[m['tag_id'] as int] = m;
+    }
+    setState(() => _master = mappa);
+  }
+
+  Future<void> _aggiornaDati(List<int> tagIds) async {
     for (final tagId in tagIds) {
-      if (!_pecore.containsKey(tagId)) {
-        final pecora = await _db.getPecora(tagId);
-        if (pecora != null) {
-          setState(() => _pecore[tagId] = pecora);
+      final tag = _tags[tagId];
+      if (tag == null) continue;
+
+      if (tag.isMaster) {
+        if (!_master.containsKey(tagId)) {
+          final m = await _db.getSingoloMaster(tagId);
+          if (m != null) setState(() => _master[tagId] = m);
+        }
+      } else {
+        if (!_pecore.containsKey(tagId)) {
+          final p = await _db.getPecora(tagId);
+          if (p != null) setState(() => _pecore[tagId] = p);
         }
       }
     }
   }
 
-  Future<void> _ricaricaPecore() async {
-    await _caricaPecoreAssociate();
+  Future<void> _ricaricaDati() async {
+    await _caricaTuttiDati();
   }
 
   Future<void> _requestAndScan() async {
@@ -142,17 +165,43 @@ class _HomeScreenState extends State<HomeScreen> {
   List<_TagEntry> _buildLista() {
     final lista = <_TagEntry>[];
 
+    // TAG visti dalla scansione
     for (final tag in _tags.values) {
-      lista.add(_TagEntry(tag: tag, pecora: _pecore[tag.tagId]));
-    }
-
-    for (final entry in _pecore.entries) {
-      if (!_tags.containsKey(entry.key)) {
-        lista.add(_TagEntry(tag: null, pecora: entry.value));
+      if (tag.isMaster) {
+        lista.add(
+          _TagEntry(tag: tag, pecora: null, master: _master[tag.tagId]),
+        );
+      } else {
+        lista.add(
+          _TagEntry(tag: tag, pecora: _pecore[tag.tagId], master: null),
+        );
       }
     }
 
-    lista.sort((a, b) => b.statoOrdine.compareTo(a.statoOrdine));
+    // Pecore associate ma non viste
+    for (final entry in _pecore.entries) {
+      if (!_tags.containsKey(entry.key)) {
+        lista.add(_TagEntry(tag: null, pecora: entry.value, master: null));
+      }
+    }
+
+    // Master associati ma non visti
+    for (final entry in _master.entries) {
+      if (!_tags.containsKey(entry.key)) {
+        lista.add(_TagEntry(tag: null, pecora: null, master: entry.value));
+      }
+    }
+
+    // Ordina: master prima, poi slave per stato
+    lista.sort((a, b) {
+      // Master sempre in cima
+      final aMaster = a.tag?.isMaster ?? (a.master != null);
+      final bMaster = b.tag?.isMaster ?? (b.master != null);
+      if (aMaster && !bMaster) return -1;
+      if (!aMaster && bMaster) return 1;
+      return b.statoOrdine.compareTo(a.statoOrdine);
+    });
+
     return lista;
   }
 
@@ -194,29 +243,47 @@ class _HomeScreenState extends State<HomeScreen> {
               itemCount: lista.length,
               itemBuilder: (context, index) {
                 final entry = lista[index];
+
+                // TAG vivo dalla scansione
                 if (entry.tag != null) {
                   return TagCard(
                     tag: entry.tag!,
                     pecora: entry.pecora,
-                    onAggiornato: _ricaricaPecore,
-                  );
-                } else {
-                  return _CardPecoraAssente(
-                    pecora: entry.pecora!,
-                    onAggiornato: _ricaricaPecore,
+                    master: entry.master,
+                    onAggiornato: _ricaricaDati,
                   );
                 }
+
+                // Pecora associata ma non vista
+                if (entry.pecora != null) {
+                  return _CardAssenteSlave(
+                    pecora: entry.pecora!,
+                    onAggiornato: _ricaricaDati,
+                  );
+                }
+
+                // Master associato ma non visto
+                if (entry.master != null) {
+                  return _CardAssenteMaster(
+                    master: entry.master!,
+                    onAggiornato: _ricaricaDati,
+                  );
+                }
+
+                return const SizedBox.shrink();
               },
             ),
     );
   }
 }
 
+// ── Entry combinata ──────────────────────────────────
 class _TagEntry {
   final TagDevice? tag;
   final Map<String, dynamic>? pecora;
+  final Map<String, dynamic>? master;
 
-  _TagEntry({required this.tag, required this.pecora});
+  _TagEntry({required this.tag, required this.pecora, required this.master});
 
   int get statoOrdine {
     if (tag == null) return 3;
@@ -228,17 +295,17 @@ class _TagEntry {
   }
 }
 
-class _CardPecoraAssente extends StatelessWidget {
+// ── Card pecora assente ──────────────────────────────
+class _CardAssenteSlave extends StatelessWidget {
   final Map<String, dynamic> pecora;
   final VoidCallback onAggiornato;
 
-  const _CardPecoraAssente({required this.pecora, required this.onAggiornato});
+  const _CardAssenteSlave({required this.pecora, required this.onAggiornato});
 
   Future<void> _apriModifica(BuildContext context) async {
     final tagId = pecora['tag_id'] as int;
     final tagIdHex =
         '0x${tagId.toRadixString(16).toUpperCase().padLeft(4, '0')}';
-
     final result = await Navigator.push(
       context,
       MaterialPageRoute(
@@ -278,13 +345,56 @@ class _CardPecoraAssente extends StatelessWidget {
                   overflow: TextOverflow.ellipsis,
                 ),
               ),
-              const SizedBox(width: 8),
               const Text(
                 'Non vista',
                 style: TextStyle(color: Colors.white38, fontSize: 12),
               ),
             ],
           ),
+        ),
+      ),
+    );
+  }
+}
+
+// ── Card master assente ──────────────────────────────
+class _CardAssenteMaster extends StatelessWidget {
+  final Map<String, dynamic> master;
+  final VoidCallback onAggiornato;
+
+  const _CardAssenteMaster({required this.master, required this.onAggiornato});
+
+  @override
+  Widget build(BuildContext context) {
+    final nome =
+        master['nome'] as String? ??
+        '0x${(master['tag_id'] as int).toRadixString(16).toUpperCase().padLeft(4, '0')}';
+
+    return Card(
+      color: const Color(0xFF0F1F3D),
+      margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 5),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+        child: Row(
+          children: [
+            const Icon(Icons.hub, color: Colors.white38, size: 28),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Text(
+                nome,
+                style: const TextStyle(
+                  color: Colors.white38,
+                  fontSize: 16,
+                  fontWeight: FontWeight.bold,
+                ),
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
+            const Text(
+              'Non visto',
+              style: TextStyle(color: Colors.white38, fontSize: 12),
+            ),
+          ],
         ),
       ),
     );

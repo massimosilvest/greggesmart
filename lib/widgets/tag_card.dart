@@ -8,12 +8,14 @@ import '../utils/ble_utils.dart';
 class TagCard extends StatelessWidget {
   final TagDevice tag;
   final Map<String, dynamic>? pecora;
+  final Map<String, dynamic>? master;
   final VoidCallback onAggiornato;
 
   const TagCard({
     super.key,
     required this.tag,
     required this.pecora,
+    required this.master,
     required this.onAggiornato,
   });
 
@@ -50,33 +52,34 @@ class TagCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    // Card MASTER
     if (tag.isMaster) {
       return _buildMasterCard(context);
     }
-
-    // Card SLAVE
     return _buildSlaveCard(context);
   }
 
   Widget _buildMasterCard(BuildContext context) {
     final distanza = BleUtils.distanzaStringa(tag.rssi);
+    final nome = master?['nome'] as String? ?? tag.tagIdHex;
+    final associato = master != null;
 
     return GestureDetector(
-      onTap: () {
-        Navigator.push(
+      onTap: () async {
+        final result = await Navigator.push(
           context,
-          MaterialPageRoute(builder: (_) => DettaglioMasterScreen(tag: tag)),
+          MaterialPageRoute(
+            builder: (_) => DettaglioMasterScreen(tag: tag, master: master),
+          ),
         );
+        if (result == true) onAggiornato();
       },
       child: Card(
-        color: const Color(0xFF0F1F3D), // Blu scuro per master
+        color: const Color(0xFF0F1F3D),
         margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 5),
         child: Padding(
           padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
           child: Row(
             children: [
-              // Icona master
               Column(
                 children: [
                   Icon(
@@ -99,19 +102,24 @@ class TagCard extends StatelessWidget {
                 ],
               ),
               const SizedBox(width: 12),
-              // Info master
               Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
-                      'Master ${tag.tagIdHex}',
+                      nome,
                       style: const TextStyle(
                         color: Color(0xFF2D9BFF),
                         fontSize: 16,
                         fontWeight: FontWeight.bold,
                       ),
+                      overflow: TextOverflow.ellipsis,
                     ),
+                    if (!associato)
+                      const Text(
+                        'Tocca per associare',
+                        style: TextStyle(color: Colors.orange, fontSize: 11),
+                      ),
                     Text(
                       tag.gpsValid
                           ? 'GPS: ${tag.latitude?.toStringAsFixed(4)}, '
@@ -125,7 +133,6 @@ class TagCard extends StatelessWidget {
                   ],
                 ),
               ),
-              // Batteria e distanza
               Column(
                 crossAxisAlignment: CrossAxisAlignment.end,
                 children: [

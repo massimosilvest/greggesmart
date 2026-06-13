@@ -46,23 +46,8 @@ class BleScanner {
     final raw = manData[0xFFFF];
     if (raw == null) return;
 
-    // DEBUG
-    print('DEBUG raw length: ${raw.length}');
-    print(
-      'DEBUG raw bytes: ${raw.map((b) => b.toRadixString(16).padLeft(2, '0')).join(' ')}',
-    );
-    if (raw.length >= 4) {
-      print('DEBUG type byte[3]: ${raw[3]}');
-    }
-
     final newTag = TagDevice.fromManufacturerData(raw, result.rssi);
-    if (newTag == null) {
-      print('DEBUG tag null!');
-      return;
-    }
-    print(
-      'DEBUG tag OK: ${newTag.tagIdHex} type:${newTag.type} gps:${newTag.gpsValid} lat:${newTag.latitude}',
-    );
+    if (newTag == null) return;
 
     final existing = _tags[newTag.tagId];
     if (existing != null) {

@@ -43,7 +43,8 @@ class _DettaglioScreenState extends State<DettaglioScreen> {
           style: TextStyle(color: Color(0xFF2DFF6E)),
         ),
         content: Text(
-          'Vuoi eliminare "${widget.pecora['nome']}"?\nVerranno cancellati anche tutti i dati storici.',
+          'Vuoi eliminare "${widget.pecora['nome']}"?\n'
+          'Verranno cancellati anche tutti i dati storici.',
           style: const TextStyle(color: Colors.white70),
         ),
         actions: [
@@ -66,6 +67,7 @@ class _DettaglioScreenState extends State<DettaglioScreen> {
     if (conferma == true) {
       await _db.eliminaPecora(widget.tag.tagId);
       if (!mounted) return;
+      // ignore: use_build_context_synchronously
       Navigator.pop(context, true);
     }
   }
@@ -111,7 +113,10 @@ class _DettaglioScreenState extends State<DettaglioScreen> {
                   ),
                 ),
               );
-              if (result == true && mounted) Navigator.pop(context, true);
+              if (result == true && mounted) {
+                // ignore: use_build_context_synchronously
+                Navigator.pop(context, true);
+              }
             },
           ),
           IconButton(

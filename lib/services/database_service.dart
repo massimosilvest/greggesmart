@@ -19,35 +19,58 @@ class DatabaseService {
 
     return await openDatabase(
       path,
-      version: 1,
+      version: 2,
       onCreate: (db, version) async {
-        // Tabella pecore
-        await db.execute('''
-          CREATE TABLE pecore (
-            tag_id INTEGER PRIMARY KEY,
-            nome TEXT NOT NULL,
-            rfid TEXT,
-            note TEXT,
-            created_at TEXT NOT NULL
-          )
-        ''');
-
-        // Tabella storico trasmissioni
-        await db.execute('''
-          CREATE TABLE storico (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            tag_id INTEGER NOT NULL,
-            timestamp TEXT NOT NULL,
-            boot_count INTEGER NOT NULL,
-            battery_pct INTEGER NOT NULL,
-            battery_mv INTEGER NOT NULL,
-            temperature INTEGER NOT NULL,
-            rssi INTEGER NOT NULL,
-            FOREIGN KEY (tag_id) REFERENCES pecore (tag_id)
-          )
-        ''');
+        await _creaTabelle(db);
+      },
+      onUpgrade: (db, oldVersion, newVersion) async {
+        if (oldVersion < 2) {
+          await db.execute('''
+            CREATE TABLE IF NOT EXISTS master (
+              tag_id INTEGER PRIMARY KEY,
+              nome TEXT,
+              note TEXT,
+              created_at TEXT NOT NULL
+            )
+          ''');
+        }
       },
     );
+  }
+
+  Future<void> _creaTabelle(Database db) async {
+    await db.execute('''
+      CREATE TABLE pecore (
+        tag_id INTEGER PRIMARY KEY,
+        nome TEXT NOT NULL,
+        rfid TEXT,
+        note TEXT,
+        created_at TEXT NOT NULL
+      )
+    ''');
+
+    await db.execute('''
+      CREATE TABLE storico (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        tag_id INTEGER NOT NULL,
+        timestamp TEXT NOT NULL,
+        boot_count INTEGER NOT NULL,
+        battery_pct INTEGER NOT NULL,
+        battery_mv INTEGER NOT NULL,
+        temperature INTEGER NOT NULL,
+        rssi INTEGER NOT NULL,
+        FOREIGN KEY (tag_id) REFERENCES pecore (tag_id)
+      )
+    ''');
+
+    await db.execute('''
+      CREATE TABLE master (
+        tag_id INTEGER PRIMARY KEY,
+        nome TEXT,
+        note TEXT,
+        created_at TEXT NOT NULL
+      )
+    ''');
   }
 
   // ── PECORE ──────────────────────────────────────────
@@ -128,12 +151,48 @@ class DatabaseService {
     );
   }
 
-  // Pulizia automatica dati vecchi di 7 giorni
   Future<void> pulisciStorico() async {
     final db = await database;
     final limit = DateTime.now()
         .subtract(const Duration(days: 7))
         .toIso8601String();
     await db.delete('storico', where: 'timestamp < ?', whereArgs: [limit]);
+  }
+
+  // ── MASTER ──────────────────────────────────────────
+
+  Future<void> salvaMaster({
+    required int tagId,
+    String? nome,
+    String? note,
+  }) async {
+    final db = await database;
+    await db.insert('master', {
+      'tag_id': tagId,
+      'nome': nome,
+      'note': note,
+      'created_at': DateTime.now().toIso8601String(),
+    }, conflictAlgorithm: ConflictAlgorithm.replace);
+  }
+
+  Future<List<Map<String, dynamic>>> getMaster() async {
+    final db = await database;
+    return await db.query('master', orderBy: 'created_at ASC');
+  }
+
+  Future<Map<String, dynamic>?> getSingoloMaster(int tagId) async {
+    final db = await database;
+    final result = await db.query(
+      'master',
+      where: 'tag_id = ?',
+      whereArgs: [tagId],
+      limit: 1,
+    );
+    return result.isNotEmpty ? result.first : null;
+  }
+
+  Future<void> eliminaMaster(int tagId) async {
+    final db = await database;
+    await db.delete('master', where: 'tag_id = ?', whereArgs: [tagId]);
   }
 }
