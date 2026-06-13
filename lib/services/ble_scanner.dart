@@ -11,7 +11,6 @@ class BleScanner {
   final Map<int, TagDevice> _tags = {};
   StreamSubscription? _scanSubscription;
   bool _shouldScan = false;
-  final _db = DatabaseService();
 
   void startScan() {
     _shouldScan = true;
@@ -47,14 +46,28 @@ class BleScanner {
     final raw = manData[0xFFFF];
     if (raw == null) return;
 
+    // DEBUG
+    print('DEBUG raw length: ${raw.length}');
+    print(
+      'DEBUG raw bytes: ${raw.map((b) => b.toRadixString(16).padLeft(2, '0')).join(' ')}',
+    );
+    if (raw.length >= 4) {
+      print('DEBUG type byte[3]: ${raw[3]}');
+    }
+
     final newTag = TagDevice.fromManufacturerData(raw, result.rssi);
-    if (newTag == null) return;
+    if (newTag == null) {
+      print('DEBUG tag null!');
+      return;
+    }
+    print(
+      'DEBUG tag OK: ${newTag.tagIdHex} type:${newTag.type} gps:${newTag.gpsValid} lat:${newTag.latitude}',
+    );
 
     final existing = _tags[newTag.tagId];
     if (existing != null) {
-      // Salva nel DB solo se bootCount è cambiato
       if (newTag.bootCount != existing.bootCount) {
-        _db.salvaTrasmissione(
+        DatabaseService().salvaTrasmissione(
           tagId: newTag.tagId,
           bootCount: newTag.bootCount,
           batteryPct: newTag.batteryPct,
@@ -70,17 +83,22 @@ class BleScanner {
         bootCount: newTag.bootCount,
         temperature: newTag.temperature,
         rssi: newTag.rssi,
+        latitude: newTag.latitude,
+        longitude: newTag.longitude,
+        gpsValid: newTag.gpsValid,
+        gatewayMode: newTag.gatewayMode,
       );
     } else {
-      // Prima volta che vediamo questo TAG
-      _db.salvaTrasmissione(
-        tagId: newTag.tagId,
-        bootCount: newTag.bootCount,
-        batteryPct: newTag.batteryPct,
-        batteryMv: newTag.batteryMv,
-        temperature: newTag.temperature,
-        rssi: newTag.rssi,
-      );
+      if (newTag.isSlave) {
+        DatabaseService().salvaTrasmissione(
+          tagId: newTag.tagId,
+          bootCount: newTag.bootCount,
+          batteryPct: newTag.batteryPct,
+          batteryMv: newTag.batteryMv,
+          temperature: newTag.temperature,
+          rssi: newTag.rssi,
+        );
+      }
       _tags[newTag.tagId] = newTag;
     }
 

@@ -62,9 +62,11 @@ class _DettaglioScreenState extends State<DettaglioScreen> {
       ),
     );
 
+    if (!mounted) return;
     if (conferma == true) {
       await _db.eliminaPecora(widget.tag.tagId);
-      if (mounted) Navigator.pop(context, true);
+      if (!mounted) return;
+      Navigator.pop(context, true);
     }
   }
 
@@ -253,9 +255,9 @@ class _DettaglioScreenState extends State<DettaglioScreen> {
                         itemBuilder: (context, index) {
                           final s = _storico[index];
                           return Padding(
-                            padding: const EdgeInsets.symmetric(vertical: 3),
-                            child: Row(
-                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                            padding: const EdgeInsets.symmetric(vertical: 4),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
                               children: [
                                 Text(
                                   _formatDateTime(s['timestamp'] as String),
@@ -264,6 +266,7 @@ class _DettaglioScreenState extends State<DettaglioScreen> {
                                     fontSize: 12,
                                   ),
                                 ),
+                                const SizedBox(height: 2),
                                 Text(
                                   '🔋${s['battery_pct']}%  '
                                   '🌡️${s['temperature']}°C  '

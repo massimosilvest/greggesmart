@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import '../models/tag_device.dart';
 import '../screens/associa_screen.dart';
 import '../screens/dettaglio_screen.dart';
+import '../screens/dettaglio_master_screen.dart';
 import '../utils/ble_utils.dart';
 
 class TagCard extends StatelessWidget {
@@ -49,6 +50,105 @@ class TagCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // Card MASTER
+    if (tag.isMaster) {
+      return _buildMasterCard(context);
+    }
+
+    // Card SLAVE
+    return _buildSlaveCard(context);
+  }
+
+  Widget _buildMasterCard(BuildContext context) {
+    final distanza = BleUtils.distanzaStringa(tag.rssi);
+
+    return GestureDetector(
+      onTap: () {
+        Navigator.push(
+          context,
+          MaterialPageRoute(builder: (_) => DettaglioMasterScreen(tag: tag)),
+        );
+      },
+      child: Card(
+        color: const Color(0xFF0F1F3D), // Blu scuro per master
+        margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 5),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+          child: Row(
+            children: [
+              // Icona master
+              Column(
+                children: [
+                  Icon(
+                    tag.gatewayMode ? Icons.router : Icons.hub,
+                    color: tag.gatewayMode
+                        ? Colors.amber
+                        : const Color(0xFF2D9BFF),
+                    size: 28,
+                  ),
+                  Text(
+                    tag.gatewayMode ? 'GW' : 'M',
+                    style: TextStyle(
+                      color: tag.gatewayMode
+                          ? Colors.amber
+                          : const Color(0xFF2D9BFF),
+                      fontSize: 10,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(width: 12),
+              // Info master
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Master ${tag.tagIdHex}',
+                      style: const TextStyle(
+                        color: Color(0xFF2D9BFF),
+                        fontSize: 16,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                    Text(
+                      tag.gpsValid
+                          ? 'GPS: ${tag.latitude?.toStringAsFixed(4)}, '
+                                '${tag.longitude?.toStringAsFixed(4)}'
+                          : 'GPS: no fix',
+                      style: TextStyle(
+                        color: tag.gpsValid ? Colors.white54 : Colors.white30,
+                        fontSize: 11,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              // Batteria e distanza
+              Column(
+                crossAxisAlignment: CrossAxisAlignment.end,
+                children: [
+                  _batteryIcon(tag),
+                  const SizedBox(height: 4),
+                  Text(
+                    distanza,
+                    style: const TextStyle(
+                      color: Colors.white70,
+                      fontSize: 13,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildSlaveCard(BuildContext context) {
     final nome = pecora?['nome'] as String? ?? tag.tagIdHex;
     final associata = pecora != null;
     final stato = BleUtils.statoTag(tag.lastSeen, tag.flags);
@@ -57,7 +157,6 @@ class TagCard extends StatelessWidget {
     return GestureDetector(
       onTap: () async {
         if (!associata) {
-          // TAG non associato → schermata associazione
           final result = await Navigator.push(
             context,
             MaterialPageRoute(
@@ -67,7 +166,6 @@ class TagCard extends StatelessWidget {
           );
           if (result == true) onAggiornato();
         } else {
-          // TAG associato → schermata dettaglio/debug
           final result = await Navigator.push(
             context,
             MaterialPageRoute(
@@ -84,10 +182,8 @@ class TagCard extends StatelessWidget {
           padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
           child: Row(
             children: [
-              // Semaforo stato
               Text(stato.emoji, style: const TextStyle(fontSize: 22)),
               const SizedBox(width: 12),
-              // Nome pecora
               Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
@@ -99,6 +195,7 @@ class TagCard extends StatelessWidget {
                         fontSize: 16,
                         fontWeight: FontWeight.bold,
                       ),
+                      overflow: TextOverflow.ellipsis,
                     ),
                     if (!associata)
                       const Text(
@@ -108,10 +205,8 @@ class TagCard extends StatelessWidget {
                   ],
                 ),
               ),
-              // Batteria
               _batteryIcon(tag),
               const SizedBox(width: 12),
-              // Distanza
               Column(
                 crossAxisAlignment: CrossAxisAlignment.end,
                 children: [
