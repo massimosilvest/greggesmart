@@ -52,9 +52,7 @@ class TagCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    if (tag.isMaster) {
-      return _buildMasterCard(context);
-    }
+    if (tag.isMaster) return _buildMasterCard(context);
     return _buildSlaveCard(context);
   }
 
@@ -62,6 +60,7 @@ class TagCard extends StatelessWidget {
     final distanza = BleUtils.distanzaStringa(tag.rssi);
     final nome = master?['nome'] as String? ?? tag.tagIdHex;
     final associato = master != null;
+    final stato = BleUtils.statoMaster(tag.lastSeen);
 
     return GestureDetector(
       onTap: () async {
@@ -84,21 +83,10 @@ class TagCard extends StatelessWidget {
                 children: [
                   Icon(
                     tag.gatewayMode ? Icons.router : Icons.hub,
-                    color: tag.gatewayMode
-                        ? Colors.amber
-                        : const Color(0xFF2D9BFF),
+                    color: tag.gatewayMode ? Colors.amber : stato.color,
                     size: 28,
                   ),
-                  Text(
-                    tag.gatewayMode ? 'GW' : 'M',
-                    style: TextStyle(
-                      color: tag.gatewayMode
-                          ? Colors.amber
-                          : const Color(0xFF2D9BFF),
-                      fontSize: 10,
-                      fontWeight: FontWeight.bold,
-                    ),
-                  ),
+                  Text(stato.emoji, style: const TextStyle(fontSize: 10)),
                 ],
               ),
               const SizedBox(width: 12),
@@ -108,8 +96,8 @@ class TagCard extends StatelessWidget {
                   children: [
                     Text(
                       nome,
-                      style: const TextStyle(
-                        color: Color(0xFF2D9BFF),
+                      style: TextStyle(
+                        color: stato.color,
                         fontSize: 16,
                         fontWeight: FontWeight.bold,
                       ),

@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:permission_handler/permission_handler.dart';
@@ -5,7 +6,9 @@ import '../services/ble_scanner.dart';
 import '../services/database_service.dart';
 import '../models/tag_device.dart';
 import '../widgets/tag_card.dart';
+import '../utils/ble_utils.dart';
 import 'associa_screen.dart';
+import 'dettaglio_master_screen.dart';
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -22,6 +25,7 @@ class _HomeScreenState extends State<HomeScreen> {
   Map<int, Map<String, dynamic>> _master = {};
   bool _isScanning = false;
   bool _bluetoothOn = true;
+  Timer? _refreshTimer;
 
   @override
   void initState() {
@@ -44,29 +48,30 @@ class _HomeScreenState extends State<HomeScreen> {
 
     _caricaTuttiDati();
     _requestAndScan();
+
+    // Aggiorna UI ogni 30 secondi per semafori
+    _refreshTimer = Timer.periodic(const Duration(seconds: 30), (_) {
+      setState(() {});
+    });
   }
 
   Future<void> _caricaTuttiDati() async {
-    await _caricaPecoreAssociate();
-    await _caricaMasterAssociati();
-  }
-
-  Future<void> _caricaPecoreAssociate() async {
     final pecore = await _db.getPecore();
-    final mappa = <int, Map<String, dynamic>>{};
+    final mapPecore = <int, Map<String, dynamic>>{};
     for (final p in pecore) {
-      mappa[p['tag_id'] as int] = p;
+      mapPecore[p['tag_id'] as int] = p;
     }
-    setState(() => _pecore = mappa);
-  }
 
-  Future<void> _caricaMasterAssociati() async {
     final master = await _db.getMaster();
-    final mappa = <int, Map<String, dynamic>>{};
+    final mapMaster = <int, Map<String, dynamic>>{};
     for (final m in master) {
-      mappa[m['tag_id'] as int] = m;
+      mapMaster[m['tag_id'] as int] = m;
     }
-    setState(() => _master = mappa);
+
+    setState(() {
+      _pecore = mapPecore;
+      _master = mapMaster;
+    });
   }
 
   Future<void> _aggiornaDati(List<int> tagIds) async {
@@ -75,15 +80,11 @@ class _HomeScreenState extends State<HomeScreen> {
       if (tag == null) continue;
 
       if (tag.isMaster) {
-        if (!_master.containsKey(tagId)) {
-          final m = await _db.getSingoloMaster(tagId);
-          if (m != null) setState(() => _master[tagId] = m);
-        }
+        final m = await _db.getSingoloMaster(tagId);
+        if (m != null) setState(() => _master[tagId] = m);
       } else {
-        if (!_pecore.containsKey(tagId)) {
-          final p = await _db.getPecora(tagId);
-          if (p != null) setState(() => _pecore[tagId] = p);
-        }
+        final p = await _db.getPecora(tagId);
+        if (p != null) setState(() => _pecore[tagId] = p);
       }
     }
   }
@@ -101,9 +102,7 @@ class _HomeScreenState extends State<HomeScreen> {
     ].request();
 
     final state = await FlutterBluePlus.adapterState.first;
-    if (state == BluetoothAdapterState.on) {
-      _startScan();
-    }
+    if (state == BluetoothAdapterState.on) _startScan();
   }
 
   void _startScan() {
@@ -158,6 +157,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
   @override
   void dispose() {
+    _refreshTimer?.cancel();
     _scanner.dispose();
     super.dispose();
   }
@@ -165,7 +165,6 @@ class _HomeScreenState extends State<HomeScreen> {
   List<_TagEntry> _buildLista() {
     final lista = <_TagEntry>[];
 
-    // TAG visti dalla scansione
     for (final tag in _tags.values) {
       if (tag.isMaster) {
         lista.add(
@@ -178,23 +177,19 @@ class _HomeScreenState extends State<HomeScreen> {
       }
     }
 
-    // Pecore associate ma non viste
     for (final entry in _pecore.entries) {
       if (!_tags.containsKey(entry.key)) {
         lista.add(_TagEntry(tag: null, pecora: entry.value, master: null));
       }
     }
 
-    // Master associati ma non visti
     for (final entry in _master.entries) {
       if (!_tags.containsKey(entry.key)) {
         lista.add(_TagEntry(tag: null, pecora: null, master: entry.value));
       }
     }
 
-    // Ordina: master prima, poi slave per stato
     lista.sort((a, b) {
-      // Master sempre in cima
       final aMaster = a.tag?.isMaster ?? (a.master != null);
       final bMaster = b.tag?.isMaster ?? (b.master != null);
       if (aMaster && !bMaster) return -1;
@@ -244,7 +239,6 @@ class _HomeScreenState extends State<HomeScreen> {
               itemBuilder: (context, index) {
                 final entry = lista[index];
 
-                // TAG vivo dalla scansione
                 if (entry.tag != null) {
                   return TagCard(
                     tag: entry.tag!,
@@ -254,7 +248,6 @@ class _HomeScreenState extends State<HomeScreen> {
                   );
                 }
 
-                // Pecora associata ma non vista
                 if (entry.pecora != null) {
                   return _CardAssenteSlave(
                     pecora: entry.pecora!,
@@ -262,7 +255,6 @@ class _HomeScreenState extends State<HomeScreen> {
                   );
                 }
 
-                // Master associato ma non visto
                 if (entry.master != null) {
                   return _CardAssenteMaster(
                     master: entry.master!,
@@ -277,7 +269,6 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 }
 
-// ── Entry combinata ──────────────────────────────────
 class _TagEntry {
   final TagDevice? tag;
   final Map<String, dynamic>? pecora;
@@ -295,7 +286,6 @@ class _TagEntry {
   }
 }
 
-// ── Card pecora assente ──────────────────────────────
 class _CardAssenteSlave extends StatelessWidget {
   final Map<String, dynamic> pecora;
   final VoidCallback onAggiornato;
@@ -357,7 +347,6 @@ class _CardAssenteSlave extends StatelessWidget {
   }
 }
 
-// ── Card master assente ──────────────────────────────
 class _CardAssenteMaster extends StatelessWidget {
   final Map<String, dynamic> master;
   final VoidCallback onAggiornato;
@@ -366,35 +355,66 @@ class _CardAssenteMaster extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final tagId = master['tag_id'] as int;
     final nome =
         master['nome'] as String? ??
-        '0x${(master['tag_id'] as int).toRadixString(16).toUpperCase().padLeft(4, '0')}';
+        '0x${tagId.toRadixString(16).toUpperCase().padLeft(4, '0')}';
+    final stato = BleUtils.statoMaster(null);
 
-    return Card(
-      color: const Color(0xFF0F1F3D),
-      margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 5),
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-        child: Row(
-          children: [
-            const Icon(Icons.hub, color: Colors.white38, size: 28),
-            const SizedBox(width: 12),
-            Expanded(
-              child: Text(
-                nome,
-                style: const TextStyle(
-                  color: Colors.white38,
-                  fontSize: 16,
-                  fontWeight: FontWeight.bold,
-                ),
-                overflow: TextOverflow.ellipsis,
+    return GestureDetector(
+      onTap: () async {
+        final result = await Navigator.push(
+          context,
+          MaterialPageRoute(
+            builder: (_) => DettaglioMasterScreen(
+              tag: TagDevice(
+                tagId: tagId,
+                type: 1,
+                batteryPct: 0,
+                batteryMv: 0,
+                flags: 0,
+                bootCount: 0,
+                temperature: 0,
+                lastSeen: DateTime(2000),
+                rssi: -999,
               ),
+              master: master,
             ),
-            const Text(
-              'Non visto',
-              style: TextStyle(color: Colors.white38, fontSize: 12),
-            ),
-          ],
+          ),
+        );
+        if (result == true) onAggiornato();
+      },
+      child: Card(
+        color: const Color(0xFF0F1F3D),
+        margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 5),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+          child: Row(
+            children: [
+              Column(
+                children: [
+                  Icon(Icons.hub, color: stato.color, size: 28),
+                  Text(stato.emoji, style: const TextStyle(fontSize: 10)),
+                ],
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Text(
+                  nome,
+                  style: TextStyle(
+                    color: stato.color,
+                    fontSize: 16,
+                    fontWeight: FontWeight.bold,
+                  ),
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+              Text(
+                stato.label,
+                style: TextStyle(color: stato.color, fontSize: 12),
+              ),
+            ],
+          ),
         ),
       ),
     );

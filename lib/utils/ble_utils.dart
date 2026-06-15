@@ -1,9 +1,7 @@
+import 'package:flutter/material.dart';
 import 'dart:math';
 
 class BleUtils {
-  // Stima distanza da RSSI
-  // TxPower: -59 dBm a 1 metro (ESP32 a potenza N0)
-  // n: 2.5 path loss exponent per campo aperto
   static double stimaDistanza(int rssi) {
     const txPower = -59;
     const n = 2.5;
@@ -11,7 +9,6 @@ class BleUtils {
     return pow(10, (txPower - rssi) / (10 * n)).toDouble();
   }
 
-  // Distanza formattata
   static String distanzaStringa(int rssi) {
     final d = stimaDistanza(rssi);
     if (d < 0) return '?';
@@ -21,13 +18,11 @@ class BleUtils {
     return '>100m';
   }
 
-  // Stato TAG basato su lastSeen e flags batteria
   static TagStato statoTag(DateTime lastSeen, int flags) {
     final secondi = DateTime.now().difference(lastSeen).inSeconds;
     final batCrit = (flags & 0x02) != 0;
     final batLow = (flags & 0x01) != 0;
 
-    // Soglie adattive alla batteria
     int soglia1, soglia2, soglia3;
     if (batCrit) {
       soglia1 = 180;
@@ -47,6 +42,16 @@ class BleUtils {
     if (secondi < soglia2) return TagStato.attenzione;
     if (secondi < soglia3) return TagStato.lontano;
     return TagStato.perso;
+  }
+
+  // Stato master basato su lastSeen (null = non visto)
+  static MasterStato statoMaster(DateTime? lastSeen) {
+    if (lastSeen == null) return MasterStato.offline;
+    final secondi = DateTime.now().difference(lastSeen).inSeconds;
+    if (secondi < 60) return MasterStato.ok;
+    if (secondi < 120) return MasterStato.attenzione;
+    if (secondi < 300) return MasterStato.lontano;
+    return MasterStato.offline;
   }
 }
 
@@ -73,9 +78,52 @@ extension TagStatoExt on TagStato {
       case TagStato.attenzione:
         return 'Attenzione';
       case TagStato.lontano:
-        return 'Lontana';
+        return 'Lontano';
       case TagStato.perso:
-        return 'Persa';
+        return 'Perso';
+    }
+  }
+}
+
+enum MasterStato { ok, attenzione, lontano, offline }
+
+extension MasterStatoExt on MasterStato {
+  String get emoji {
+    switch (this) {
+      case MasterStato.ok:
+        return '🟢';
+      case MasterStato.attenzione:
+        return '🟡';
+      case MasterStato.lontano:
+        return '🔴';
+      case MasterStato.offline:
+        return '⬛';
+    }
+  }
+
+  String get label {
+    switch (this) {
+      case MasterStato.ok:
+        return 'Attivo';
+      case MasterStato.attenzione:
+        return 'Attenzione';
+      case MasterStato.lontano:
+        return 'Lontano';
+      case MasterStato.offline:
+        return 'Offline';
+    }
+  }
+
+  Color get color {
+    switch (this) {
+      case MasterStato.ok:
+        return const Color(0xFF2D9BFF);
+      case MasterStato.attenzione:
+        return const Color(0xFFFFD700);
+      case MasterStato.lontano:
+        return const Color(0xFFFF6B35);
+      case MasterStato.offline:
+        return const Color(0xFF666666);
     }
   }
 }

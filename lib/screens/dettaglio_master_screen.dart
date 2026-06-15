@@ -16,6 +16,7 @@ class DettaglioMasterScreen extends StatefulWidget {
 class _DettaglioMasterScreenState extends State<DettaglioMasterScreen> {
   final _db = DatabaseService();
   late TextEditingController _nomeController;
+  late TextEditingController _rfidController;
   late TextEditingController _noteController;
   bool _saving = false;
   bool _modificaAperta = false;
@@ -26,6 +27,9 @@ class _DettaglioMasterScreenState extends State<DettaglioMasterScreen> {
     _nomeController = TextEditingController(
       text: widget.master?['nome'] as String? ?? '',
     );
+    _rfidController = TextEditingController(
+      text: widget.master?['rfid'] as String? ?? '',
+    );
     _noteController = TextEditingController(
       text: widget.master?['note'] as String? ?? '',
     );
@@ -34,26 +38,44 @@ class _DettaglioMasterScreenState extends State<DettaglioMasterScreen> {
   @override
   void dispose() {
     _nomeController.dispose();
+    _rfidController.dispose();
     _noteController.dispose();
     super.dispose();
   }
 
   Future<void> _salva() async {
+    print('DEBUG: inizio salvataggio');
+    if (_nomeController.text.trim().isEmpty) {
+      setState(() => _modificaAperta = false);
+      return;
+    }
     setState(() => _saving = true);
-    await _db.salvaMaster(
-      tagId: widget.tag.tagId,
-      nome: _nomeController.text.trim().isEmpty
-          ? null
-          : _nomeController.text.trim(),
-      note: _noteController.text.trim().isEmpty
-          ? null
-          : _noteController.text.trim(),
-    );
+
+    try {
+      print('DEBUG: chiamo salvaMaster');
+      await _db.salvaMaster(
+        tagId: widget.tag.tagId,
+        nome: _nomeController.text.trim(),
+        rfid: _rfidController.text.trim().isEmpty
+            ? null
+            : _rfidController.text.trim(),
+        note: _noteController.text.trim().isEmpty
+            ? null
+            : _noteController.text.trim(),
+      );
+      print('DEBUG: salvaMaster completato');
+    } catch (e) {
+      print('DEBUG: errore salvaMaster: $e');
+      setState(() => _saving = false);
+      return;
+    }
+
+    if (!mounted) return;
     setState(() {
       _saving = false;
       _modificaAperta = false;
     });
-    if (mounted) Navigator.pop(context, true);
+    Navigator.pop(context, true);
   }
 
   Future<void> _elimina() async {
@@ -66,7 +88,8 @@ class _DettaglioMasterScreenState extends State<DettaglioMasterScreen> {
           style: TextStyle(color: Color(0xFF2D9BFF)),
         ),
         content: const Text(
-          'Vuoi eliminare questo master dal registro?',
+          'Vuoi eliminare questo master dal registro?\n'
+          'Verranno cancellati anche tutti i dati storici associati.',
           style: TextStyle(color: Colors.white70),
         ),
         actions: [
@@ -89,6 +112,7 @@ class _DettaglioMasterScreenState extends State<DettaglioMasterScreen> {
     if (conferma == true) {
       await _db.eliminaMaster(widget.tag.tagId);
       if (!mounted) return;
+      // ignore: use_build_context_synchronously
       Navigator.pop(context, true);
     }
   }
@@ -97,6 +121,7 @@ class _DettaglioMasterScreenState extends State<DettaglioMasterScreen> {
   Widget build(BuildContext context) {
     final tag = widget.tag;
     final distanza = BleUtils.distanzaStringa(tag.rssi);
+    final stato = BleUtils.statoMaster(tag.lastSeen);
     final associato = widget.master != null;
 
     return Scaffold(
@@ -142,8 +167,8 @@ class _DettaglioMasterScreenState extends State<DettaglioMasterScreen> {
                       mainAxisAlignment: MainAxisAlignment.spaceBetween,
                       children: [
                         _infoTile(
-                          tag.gatewayMode ? '🔵' : '🟢',
-                          tag.gatewayMode ? 'Gateway' : 'Master',
+                          tag.gatewayMode ? '🔵' : stato.emoji,
+                          tag.gatewayMode ? 'Gateway' : stato.label,
                           'Modalità',
                         ),
                         _infoTile('📶', distanza, '${tag.rssi} dBm'),
@@ -245,6 +270,8 @@ class _DettaglioMasterScreenState extends State<DettaglioMasterScreen> {
                         'Nome',
                         widget.master?['nome'] as String? ?? '-',
                       ),
+                      if (widget.master?['rfid'] != null)
+                        _debugRow('RFID', widget.master!['rfid'] as String),
                       if (widget.master?['note'] != null)
                         _debugRow('Note', widget.master!['note'] as String),
                     ],
@@ -269,6 +296,27 @@ class _DettaglioMasterScreenState extends State<DettaglioMasterScreen> {
                             borderSide: const BorderSide(
                               color: Color(0xFF2D9BFF),
                             ),
+                          ),
+                          focusedBorder: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(8),
+                            borderSide: const BorderSide(
+                              color: Color(0xFF2D9BFF),
+                            ),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+                      TextField(
+                        controller: _rfidController,
+                        style: const TextStyle(color: Colors.white),
+                        decoration: InputDecoration(
+                          hintText: 'RFID (opzionale)...',
+                          hintStyle: const TextStyle(color: Colors.white38),
+                          filled: true,
+                          fillColor: const Color(0xFF0A1A2F),
+                          border: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(8),
+                            borderSide: const BorderSide(color: Colors.white24),
                           ),
                           focusedBorder: OutlineInputBorder(
                             borderRadius: BorderRadius.circular(8),
@@ -392,7 +440,7 @@ class _DettaglioMasterScreenState extends State<DettaglioMasterScreen> {
                     SizedBox(
                       width: double.infinity,
                       child: ElevatedButton.icon(
-                        onPressed: null, // TODO: gateway + download
+                        onPressed: null,
                         icon: const Icon(Icons.download),
                         label: const Text('ATTIVA GATEWAY E SCARICA'),
                         style: ElevatedButton.styleFrom(

@@ -19,21 +19,15 @@ class DatabaseService {
 
     return await openDatabase(
       path,
-      version: 2,
+      version: 3,
       onCreate: (db, version) async {
         await _creaTabelle(db);
       },
       onUpgrade: (db, oldVersion, newVersion) async {
-        if (oldVersion < 2) {
-          await db.execute('''
-            CREATE TABLE IF NOT EXISTS master (
-              tag_id INTEGER PRIMARY KEY,
-              nome TEXT,
-              note TEXT,
-              created_at TEXT NOT NULL
-            )
-          ''');
-        }
+        await db.execute('DROP TABLE IF EXISTS master');
+        await db.execute('DROP TABLE IF EXISTS storico');
+        await db.execute('DROP TABLE IF EXISTS pecore');
+        await _creaTabelle(db);
       },
     );
   }
@@ -67,6 +61,7 @@ class DatabaseService {
       CREATE TABLE master (
         tag_id INTEGER PRIMARY KEY,
         nome TEXT,
+        rfid TEXT,
         note TEXT,
         created_at TEXT NOT NULL
       )
@@ -164,12 +159,14 @@ class DatabaseService {
   Future<void> salvaMaster({
     required int tagId,
     String? nome,
+    String? rfid,
     String? note,
   }) async {
     final db = await database;
     await db.insert('master', {
       'tag_id': tagId,
       'nome': nome,
+      'rfid': rfid,
       'note': note,
       'created_at': DateTime.now().toIso8601String(),
     }, conflictAlgorithm: ConflictAlgorithm.replace);
