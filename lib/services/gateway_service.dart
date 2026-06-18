@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'package:flutter/foundation.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 
 class GatewayService {
@@ -14,16 +15,36 @@ class GatewayService {
 
     BluetoothDevice? targetDevice;
     final masterIdHex = masterId.toRadixString(16).toLowerCase();
-    print('DEBUG: cerco master con hex: $masterIdHex');
+    debugPrint('DEBUG: cerco master con hex: $masterIdHex');
+    onStatus('Cerca device con nome che contenga $masterIdHex');
 
     final subscription = FlutterBluePlus.scanResults.listen((results) {
       for (final r in results) {
         final name = r.device.platformName;
+        final remoteId = r.device.remoteId.toString();
+        final normalizedRemoteId = remoteId.replaceAll(':', '').toLowerCase();
+        final manufacturerKeys = r.advertisementData.manufacturerData.keys
+            .map((k) => '0x${k.toRadixString(16)}')
+            .join(', ');
+
+        debugPrint(
+          'DEBUG: candidate device name="$name" id=$remoteId mfg=[$manufacturerKeys]',
+        );
+
         if (name.isNotEmpty) {
-          print('DEBUG: device trovato con nome: "$name"');
+          onStatus('Visto $name');
         }
-        if (name.toLowerCase().contains(masterIdHex)) {
-          print('DEBUG: MATCH! device: $name');
+
+        final matchesName = name.toLowerCase().contains(masterIdHex);
+        final matchesAddress = normalizedRemoteId.contains(masterIdHex);
+
+        if (matchesName || matchesAddress) {
+          debugPrint('DEBUG: MATCH! device: $name id=$remoteId');
+          onStatus(
+            name.isNotEmpty
+                ? 'Master trovato: $name'
+                : 'Master trovato: $remoteId',
+          );
           targetDevice = r.device;
         }
       }
@@ -37,7 +58,9 @@ class GatewayService {
     await subscription.cancel();
 
     if (targetDevice == null) {
-      onStatus("Master non trovato. Assicurati sia nella finestra attiva.");
+      onStatus(
+        'Master non trovato: nessun device con nome o indirizzo che contenga $masterIdHex',
+      );
       throw Exception("Master non trovato");
     }
 
@@ -51,7 +74,7 @@ class GatewayService {
     BluetoothCharacteristic? dataChar;
 
     for (final service in services) {
-      print('DEBUG: servizio trovato: ${service.uuid}');
+      debugPrint('DEBUG: servizio trovato: ${service.uuid}');
       if (service.uuid.toString().toLowerCase() == serviceUuid.toLowerCase()) {
         for (final c in service.characteristics) {
           if (c.uuid.toString().toLowerCase() == cmdCharUuid.toLowerCase()) {

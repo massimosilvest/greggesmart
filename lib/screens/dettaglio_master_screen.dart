@@ -1,5 +1,6 @@
 import '../services/gateway_service.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart';
 import '../models/tag_device.dart';
 import '../services/database_service.dart';
 import '../utils/ble_utils.dart';
@@ -56,7 +57,7 @@ class _DettaglioMasterScreenState extends State<DettaglioMasterScreen> {
   }
 
   Future<void> _salva() async {
-    print('DEBUG: inizio salvataggio');
+    debugPrint('DEBUG: inizio salvataggio');
     if (_nomeController.text.trim().isEmpty) {
       setState(() => _modificaAperta = false);
       return;
@@ -64,7 +65,7 @@ class _DettaglioMasterScreenState extends State<DettaglioMasterScreen> {
     setState(() => _saving = true);
 
     try {
-      print('DEBUG: chiamo salvaMaster');
+      debugPrint('DEBUG: chiamo salvaMaster');
       await _db.salvaMaster(
         tagId: widget.tag.tagId,
         nome: _nomeController.text.trim(),
@@ -75,9 +76,9 @@ class _DettaglioMasterScreenState extends State<DettaglioMasterScreen> {
             ? null
             : _noteController.text.trim(),
       );
-      print('DEBUG: salvaMaster completato');
+      debugPrint('DEBUG: salvaMaster completato');
     } catch (e) {
-      print('DEBUG: errore salvaMaster: $e');
+      debugPrint('DEBUG: errore salvaMaster: $e');
       setState(() => _saving = false);
       return;
     }
@@ -134,7 +135,7 @@ class _DettaglioMasterScreenState extends State<DettaglioMasterScreen> {
 
     setState(() {
       _scaricando = true;
-      _statusMessage = 'Avvio...';
+      _statusMessage = 'Avvio download master ${widget.tag.tagIdHex}...';
     });
 
     try {
@@ -160,7 +161,7 @@ class _DettaglioMasterScreenState extends State<DettaglioMasterScreen> {
       if (mounted) {
         setState(() {
           _scaricando = false;
-          _statusMessage = '';
+          _statusMessage = 'Errore: $e';
         });
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('Errore: $e'), backgroundColor: Colors.red),
