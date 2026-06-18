@@ -9,6 +9,7 @@ import '../widgets/tag_card.dart';
 import '../utils/ble_utils.dart';
 import 'associa_screen.dart';
 import 'dettaglio_master_screen.dart';
+import 'impostazioni_screen.dart';
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -26,12 +27,14 @@ class _HomeScreenState extends State<HomeScreen> {
   bool _isScanning = false;
   bool _bluetoothOn = true;
   Timer? _refreshTimer;
+  int _numeroMaster = 0;
 
   @override
   void initState() {
     super.initState();
 
     FlutterBluePlus.adapterState.listen((state) {
+      if (!mounted) return;
       setState(() {
         _bluetoothOn = state == BluetoothAdapterState.on;
       });
@@ -42,6 +45,7 @@ class _HomeScreenState extends State<HomeScreen> {
     });
 
     _scanner.tagsStream.listen((tags) {
+      if (!mounted) return;
       setState(() => _tags = tags);
       _aggiornaDati(tags.keys.toList());
     });
@@ -49,13 +53,17 @@ class _HomeScreenState extends State<HomeScreen> {
     _caricaTuttiDati();
     _requestAndScan();
 
-    // Aggiorna UI ogni 30 secondi per semafori
     _refreshTimer = Timer.periodic(const Duration(seconds: 30), (_) {
-      setState(() {});
+      if (mounted) {
+        setState(() {});
+      }
     });
   }
 
   Future<void> _caricaTuttiDati() async {
+    final config = await _db.getConfigurazione('numero_master');
+    final numeroMaster = int.tryParse(config ?? '0') ?? 0;
+
     final pecore = await _db.getPecore();
     final mapPecore = <int, Map<String, dynamic>>{};
     for (final p in pecore) {
@@ -68,7 +76,9 @@ class _HomeScreenState extends State<HomeScreen> {
       mapMaster[m['tag_id'] as int] = m;
     }
 
+    if (!mounted) return;
     setState(() {
+      _numeroMaster = numeroMaster;
       _pecore = mapPecore;
       _master = mapMaster;
     });
@@ -81,10 +91,10 @@ class _HomeScreenState extends State<HomeScreen> {
 
       if (tag.isMaster) {
         final m = await _db.getSingoloMaster(tagId);
-        if (m != null) setState(() => _master[tagId] = m);
+        if (m != null && mounted) setState(() => _master[tagId] = m);
       } else {
         final p = await _db.getPecora(tagId);
-        if (p != null) setState(() => _pecore[tagId] = p);
+        if (p != null && mounted) setState(() => _pecore[tagId] = p);
       }
     }
   }
@@ -112,6 +122,16 @@ class _HomeScreenState extends State<HomeScreen> {
     }
     setState(() => _isScanning = true);
     _scanner.startScan();
+  }
+
+  void _pausaScanPerGateway() {
+    _scanner.stopScan();
+  }
+
+  void _riprendiScanDopoGateway() {
+    if (_isScanning) {
+      _scanner.startScan();
+    }
   }
 
   void _stopScan() {
@@ -167,9 +187,11 @@ class _HomeScreenState extends State<HomeScreen> {
 
     for (final tag in _tags.values) {
       if (tag.isMaster) {
-        lista.add(
-          _TagEntry(tag: tag, pecora: null, master: _master[tag.tagId]),
-        );
+        if (_numeroMaster >= 1) {
+          lista.add(
+            _TagEntry(tag: tag, pecora: null, master: _master[tag.tagId]),
+          );
+        }
       } else {
         lista.add(
           _TagEntry(tag: tag, pecora: _pecore[tag.tagId], master: null),
@@ -183,9 +205,11 @@ class _HomeScreenState extends State<HomeScreen> {
       }
     }
 
-    for (final entry in _master.entries) {
-      if (!_tags.containsKey(entry.key)) {
-        lista.add(_TagEntry(tag: null, pecora: null, master: entry.value));
+    if (_numeroMaster >= 1) {
+      for (final entry in _master.entries) {
+        if (!_tags.containsKey(entry.key)) {
+          lista.add(_TagEntry(tag: null, pecora: null, master: entry.value));
+        }
       }
     }
 
@@ -217,7 +241,17 @@ class _HomeScreenState extends State<HomeScreen> {
             _bluetoothOn ? Icons.bluetooth : Icons.bluetooth_disabled,
             color: _bluetoothOn ? const Color(0xFF2DFF6E) : Colors.red,
           ),
-          const SizedBox(width: 8),
+          const SizedBox(width: 4),
+          IconButton(
+            icon: const Icon(Icons.settings, color: Color(0xFF2DFF6E)),
+            onPressed: () async {
+              await Navigator.push(
+                context,
+                MaterialPageRoute(builder: (_) => const ImpostazioniScreen()),
+              );
+              _ricaricaDati();
+            },
+          ),
           IconButton(
             icon: Icon(
               _isScanning ? Icons.stop : Icons.play_arrow,
@@ -245,6 +279,8 @@ class _HomeScreenState extends State<HomeScreen> {
                     pecora: entry.pecora,
                     master: entry.master,
                     onAggiornato: _ricaricaDati,
+                    onPausaScan: _pausaScanPerGateway,
+                    onRiprendiScan: _riprendiScanDopoGateway,
                   );
                 }
 
@@ -379,6 +415,10 @@ class _CardAssenteMaster extends StatelessWidget {
                 rssi: -999,
               ),
               master: master,
+              onPausaScan:
+                  () {}, // Funzione vuota: non blocca la scansione generale
+              onRiprendiScan:
+                  () {}, // Funzione vuota: nessun effetto sulla scansione
             ),
           ),
         );

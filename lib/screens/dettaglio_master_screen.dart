@@ -1,3 +1,4 @@
+import '../services/gateway_service.dart';
 import 'package:flutter/material.dart';
 import '../models/tag_device.dart';
 import '../services/database_service.dart';
@@ -6,8 +7,16 @@ import '../utils/ble_utils.dart';
 class DettaglioMasterScreen extends StatefulWidget {
   final TagDevice tag;
   final Map<String, dynamic>? master;
+  final VoidCallback onPausaScan;
+  final VoidCallback onRiprendiScan;
 
-  const DettaglioMasterScreen({super.key, required this.tag, this.master});
+  const DettaglioMasterScreen({
+    super.key,
+    required this.tag,
+    this.master,
+    required this.onPausaScan,
+    required this.onRiprendiScan,
+  });
 
   @override
   State<DettaglioMasterScreen> createState() => _DettaglioMasterScreenState();
@@ -20,6 +29,9 @@ class _DettaglioMasterScreenState extends State<DettaglioMasterScreen> {
   late TextEditingController _noteController;
   bool _saving = false;
   bool _modificaAperta = false;
+  final _gatewayService = GatewayService();
+  bool _scaricando = false;
+  String _statusMessage = '';
 
   @override
   void initState() {
@@ -112,9 +124,51 @@ class _DettaglioMasterScreenState extends State<DettaglioMasterScreen> {
     if (conferma == true) {
       await _db.eliminaMaster(widget.tag.tagId);
       if (!mounted) return;
-      // ignore: use_build_context_synchronously
       Navigator.pop(context, true);
     }
+  }
+
+  Future<void> _avviaDownload() async {
+    widget.onPausaScan();
+    await Future.delayed(const Duration(milliseconds: 500));
+
+    setState(() {
+      _scaricando = true;
+      _statusMessage = 'Avvio...';
+    });
+
+    try {
+      final records = await _gatewayService.scaricaDaGateway(
+        masterId: widget.tag.tagId,
+        onStatus: (status) {
+          if (mounted) setState(() => _statusMessage = status);
+        },
+      );
+
+      await _db.salvaDatiGateway(records);
+
+      if (mounted) {
+        setState(() => _scaricando = false);
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Scaricati ${records.length} record!'),
+            backgroundColor: Colors.green,
+          ),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          _scaricando = false;
+          _statusMessage = '';
+        });
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Errore: $e'), backgroundColor: Colors.red),
+        );
+      }
+    }
+
+    widget.onRiprendiScan();
   }
 
   @override
@@ -146,7 +200,6 @@ class _DettaglioMasterScreenState extends State<DettaglioMasterScreen> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            // ── Stato ───────────────────────────────────
             Card(
               color: const Color(0xFF0F1F3D),
               child: Padding(
@@ -186,7 +239,6 @@ class _DettaglioMasterScreenState extends State<DettaglioMasterScreen> {
             ),
             const SizedBox(height: 12),
 
-            // ── GPS ──────────────────────────────────────
             Card(
               color: const Color(0xFF0F1F3D),
               child: Padding(
@@ -218,7 +270,7 @@ class _DettaglioMasterScreenState extends State<DettaglioMasterScreen> {
                       const Padding(
                         padding: EdgeInsets.only(top: 8),
                         child: Text(
-                          'Coordinate storiche — ultimo fix noto',
+                          'Coordinate storiche - ultimo fix noto',
                           style: TextStyle(
                             color: Colors.white30,
                             fontSize: 11,
@@ -232,7 +284,6 @@ class _DettaglioMasterScreenState extends State<DettaglioMasterScreen> {
             ),
             const SizedBox(height: 12),
 
-            // ── Associazione ─────────────────────────────
             Card(
               color: const Color(0xFF0F1F3D),
               child: Padding(
@@ -383,7 +434,6 @@ class _DettaglioMasterScreenState extends State<DettaglioMasterScreen> {
             ),
             const SizedBox(height: 12),
 
-            // ── Debug ────────────────────────────────────
             Card(
               color: const Color(0xFF0F1F3D),
               child: Padding(
@@ -420,7 +470,6 @@ class _DettaglioMasterScreenState extends State<DettaglioMasterScreen> {
             ),
             const SizedBox(height: 12),
 
-            // ── Azioni ───────────────────────────────────
             Card(
               color: const Color(0xFF0F1F3D),
               child: Padding(
@@ -437,21 +486,36 @@ class _DettaglioMasterScreenState extends State<DettaglioMasterScreen> {
                       ),
                     ),
                     const SizedBox(height: 12),
-                    SizedBox(
-                      width: double.infinity,
-                      child: ElevatedButton.icon(
-                        onPressed: null,
-                        icon: const Icon(Icons.download),
-                        label: const Text('ATTIVA GATEWAY E SCARICA'),
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: const Color(0xFF2D9BFF),
-                          foregroundColor: Colors.white,
-                          disabledBackgroundColor: const Color(
-                            0xFF2D9BFF,
-                          ).withValues(alpha: 0.3),
+                    if (_scaricando)
+                      Column(
+                        children: [
+                          const CircularProgressIndicator(
+                            color: Color(0xFF2D9BFF),
+                          ),
+                          const SizedBox(height: 12),
+                          Text(
+                            _statusMessage,
+                            style: const TextStyle(
+                              color: Colors.white70,
+                              fontSize: 13,
+                            ),
+                            textAlign: TextAlign.center,
+                          ),
+                        ],
+                      )
+                    else
+                      SizedBox(
+                        width: double.infinity,
+                        child: ElevatedButton.icon(
+                          onPressed: _avviaDownload,
+                          icon: const Icon(Icons.download),
+                          label: const Text('ATTIVA GATEWAY E SCARICA'),
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: const Color(0xFF2D9BFF),
+                            foregroundColor: Colors.white,
+                          ),
                         ),
                       ),
-                    ),
                   ],
                 ),
               ),

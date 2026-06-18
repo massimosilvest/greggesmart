@@ -19,7 +19,7 @@ class DatabaseService {
 
     return await openDatabase(
       path,
-      version: 3,
+      version: 4,
       onCreate: (db, version) async {
         await _creaTabelle(db);
       },
@@ -27,6 +27,7 @@ class DatabaseService {
         await db.execute('DROP TABLE IF EXISTS master');
         await db.execute('DROP TABLE IF EXISTS storico');
         await db.execute('DROP TABLE IF EXISTS pecore');
+        await db.execute('DROP TABLE IF EXISTS configurazione');
         await _creaTabelle(db);
       },
     );
@@ -64,6 +65,13 @@ class DatabaseService {
         rfid TEXT,
         note TEXT,
         created_at TEXT NOT NULL
+      )
+    ''');
+
+    await db.execute('''
+      CREATE TABLE configurazione (
+        chiave TEXT PRIMARY KEY,
+        valore TEXT NOT NULL
       )
     ''');
   }
@@ -191,5 +199,44 @@ class DatabaseService {
   Future<void> eliminaMaster(int tagId) async {
     final db = await database;
     await db.delete('master', where: 'tag_id = ?', whereArgs: [tagId]);
+  }
+
+  // ── CONFIGURAZIONE ──────────────────────────────────
+
+  Future<void> salvaConfigurazione(String chiave, String valore) async {
+    final db = await database;
+    await db.insert('configurazione', {
+      'chiave': chiave,
+      'valore': valore,
+    }, conflictAlgorithm: ConflictAlgorithm.replace);
+  }
+
+  Future<String?> getConfigurazione(String chiave) async {
+    final db = await database;
+    final result = await db.query(
+      'configurazione',
+      where: 'chiave = ?',
+      whereArgs: [chiave],
+      limit: 1,
+    );
+    return result.isNotEmpty ? result.first['valore'] as String? : null;
+  }
+
+  Future<void> salvaDatiGateway(List<Map<String, dynamic>> records) async {
+    final db = await database;
+    for (final r in records) {
+      final ts = DateTime.fromMillisecondsSinceEpoch(
+        (r['timestamp'] as int) * 1000,
+      );
+      await db.insert('storico', {
+        'tag_id': r['tag_id'],
+        'timestamp': ts.toIso8601String(),
+        'boot_count': 0,
+        'battery_pct': r['battery_pct'],
+        'battery_mv': 0,
+        'temperature': r['temperature'],
+        'rssi': r['rssi'],
+      });
+    }
   }
 }

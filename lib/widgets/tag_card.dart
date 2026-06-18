@@ -10,6 +10,8 @@ class TagCard extends StatelessWidget {
   final Map<String, dynamic>? pecora;
   final Map<String, dynamic>? master;
   final VoidCallback onAggiornato;
+  final VoidCallback onPausaScan;
+  final VoidCallback onRiprendiScan;
 
   const TagCard({
     super.key,
@@ -17,6 +19,8 @@ class TagCard extends StatelessWidget {
     required this.pecora,
     required this.master,
     required this.onAggiornato,
+    required this.onPausaScan,
+    required this.onRiprendiScan,
   });
 
   Widget _batteryIcon(TagDevice tag) {
@@ -67,7 +71,12 @@ class TagCard extends StatelessWidget {
         final result = await Navigator.push(
           context,
           MaterialPageRoute(
-            builder: (_) => DettaglioMasterScreen(tag: tag, master: master),
+            builder: (_) => DettaglioMasterScreen(
+              tag: tag,
+              master: master,
+              onPausaScan: onPausaScan,
+              onRiprendiScan: onRiprendiScan,
+            ),
           ),
         );
         if (result == true) onAggiornato();
