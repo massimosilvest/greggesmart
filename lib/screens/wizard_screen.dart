@@ -13,7 +13,7 @@ class _WizardScreenState extends State<WizardScreen> {
   int _numeroMaster = 0;
 
   Future<void> _salva() async {
-    await _db.salvaConfigurazione('numero_master', _numeroMaster.toString());
+    await _db.salvaNumeroMaster(_numeroMaster);
     if (mounted) Navigator.pop(context, true);
   }
 

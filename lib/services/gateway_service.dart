@@ -6,6 +6,8 @@ class GatewayService {
   static const String serviceUuid = "6e400001-b5a3-f393-e0a9-e50e24dcca9e";
   static const String cmdCharUuid = "6e400002-b5a3-f393-e0a9-e50e24dcca9e";
   static const String dataCharUuid = "6e400003-b5a3-f393-e0a9-e50e24dcca9e";
+  static const Duration _scanTimeout = Duration(seconds: 20);
+  static const Duration _connectTimeout = Duration(seconds: 30);
 
   Future<List<Map<String, dynamic>>> scaricaDaGateway({
     required int masterId,
@@ -52,8 +54,8 @@ class GatewayService {
 
     await FlutterBluePlus.stopScan();
     await Future.delayed(const Duration(milliseconds: 500));
-    await FlutterBluePlus.startScan(timeout: const Duration(seconds: 10));
-    await Future.delayed(const Duration(seconds: 10));
+    await FlutterBluePlus.startScan(timeout: _scanTimeout);
+    await Future.delayed(_scanTimeout);
     await FlutterBluePlus.stopScan();
     await subscription.cancel();
 
@@ -65,7 +67,7 @@ class GatewayService {
     }
 
     onStatus("Connessione al master...");
-    await targetDevice!.connect(timeout: const Duration(seconds: 10));
+    await targetDevice!.connect(timeout: _connectTimeout);
 
     onStatus("Scoperta servizi...");
     final services = await targetDevice!.discoverServices();

@@ -76,6 +76,7 @@ class TagCard extends StatelessWidget {
               master: master,
               onPausaScan: onPausaScan,
               onRiprendiScan: onRiprendiScan,
+              onAggiornato: onAggiornato,
             ),
           ),
         );

@@ -6,6 +6,8 @@ class DatabaseService {
   factory DatabaseService() => _instance;
   DatabaseService._internal();
 
+  static const String _chiaveNumeroMaster = 'numero_master';
+
   Database? _db;
 
   Future<Database> get database async {
@@ -17,20 +19,16 @@ class DatabaseService {
     final dbPath = await getDatabasesPath();
     final path = join(dbPath, 'greggesmart.db');
 
-    return await openDatabase(
+    final db = await openDatabase(
       path,
       version: 4,
       onCreate: (db, version) async {
         await _creaTabelle(db);
       },
-      onUpgrade: (db, oldVersion, newVersion) async {
-        await db.execute('DROP TABLE IF EXISTS master');
-        await db.execute('DROP TABLE IF EXISTS storico');
-        await db.execute('DROP TABLE IF EXISTS pecore');
-        await db.execute('DROP TABLE IF EXISTS configurazione');
-        await _creaTabelle(db);
-      },
     );
+
+    await _assicuraColonnaMasterId(db);
+    return db;
   }
 
   Future<void> _creaTabelle(Database db) async {
@@ -48,6 +46,7 @@ class DatabaseService {
       CREATE TABLE storico (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         tag_id INTEGER NOT NULL,
+        master_id INTEGER,
         timestamp TEXT NOT NULL,
         boot_count INTEGER NOT NULL,
         battery_pct INTEGER NOT NULL,
@@ -116,10 +115,19 @@ class DatabaseService {
     await db.delete('storico', where: 'tag_id = ?', whereArgs: [tagId]);
   }
 
+  Future<void> _assicuraColonnaMasterId(Database db) async {
+    final info = await db.rawQuery('PRAGMA table_info(storico)');
+    final hasMasterId = info.any((row) => row['name'] == 'master_id');
+    if (!hasMasterId) {
+      await db.execute('ALTER TABLE storico ADD COLUMN master_id INTEGER');
+    }
+  }
+
   // ── STORICO ─────────────────────────────────────────
 
   Future<void> salvaTrasmissione({
     required int tagId,
+    int? masterId,
     required int bootCount,
     required int batteryPct,
     required int batteryMv,
@@ -129,6 +137,7 @@ class DatabaseService {
     final db = await database;
     await db.insert('storico', {
       'tag_id': tagId,
+      'master_id': masterId,
       'timestamp': DateTime.now().toIso8601String(),
       'boot_count': bootCount,
       'battery_pct': batteryPct,
@@ -211,6 +220,10 @@ class DatabaseService {
     }, conflictAlgorithm: ConflictAlgorithm.replace);
   }
 
+  Future<void> salvaNumeroMaster(int numeroMaster) async {
+    await salvaConfigurazione(_chiaveNumeroMaster, numeroMaster.toString());
+  }
+
   Future<String?> getConfigurazione(String chiave) async {
     final db = await database;
     final result = await db.query(
@@ -222,6 +235,15 @@ class DatabaseService {
     return result.isNotEmpty ? result.first['valore'] as String? : null;
   }
 
+  Future<int> getNumeroMaster() async {
+    final valore = await getConfigurazione(_chiaveNumeroMaster);
+    return int.tryParse(valore ?? '0') ?? 0;
+  }
+
+  Future<bool> isModalitaIbrida() async {
+    return (await getNumeroMaster()) > 0;
+  }
+
   Future<void> salvaDatiGateway(List<Map<String, dynamic>> records) async {
     final db = await database;
     for (final r in records) {
@@ -230,6 +252,7 @@ class DatabaseService {
       );
       await db.insert('storico', {
         'tag_id': r['tag_id'],
+        'master_id': r['master_id'],
         'timestamp': ts.toIso8601String(),
         'boot_count': 0,
         'battery_pct': r['battery_pct'],
@@ -238,5 +261,24 @@ class DatabaseService {
         'rssi': r['rssi'],
       });
     }
+  }
+
+  Future<Map<int, int>> getUltimoMasterPerSlave() async {
+    final db = await database;
+    final rows = await db.rawQuery('''
+      SELECT tag_id, master_id, timestamp
+      FROM storico
+      WHERE master_id IS NOT NULL
+      ORDER BY timestamp DESC
+    ''');
+
+    final mappa = <int, int>{};
+    for (final row in rows) {
+      final tagId = row['tag_id'] as int?;
+      final masterId = row['master_id'] as int?;
+      if (tagId == null || masterId == null) continue;
+      mappa.putIfAbsent(tagId, () => masterId);
+    }
+    return mappa;
   }
 }

@@ -24,6 +24,7 @@ class _HomeScreenState extends State<HomeScreen> {
   Map<int, TagDevice> _tags = {};
   Map<int, Map<String, dynamic>> _pecore = {};
   Map<int, Map<String, dynamic>> _master = {};
+  Map<int, int> _slaveMasterByDb = {};
   bool _isScanning = false;
   bool _bluetoothOn = true;
   Timer? _refreshTimer;
@@ -61,8 +62,7 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> _caricaTuttiDati() async {
-    final config = await _db.getConfigurazione('numero_master');
-    final numeroMaster = int.tryParse(config ?? '0') ?? 0;
+    final numeroMaster = await _db.getNumeroMaster();
 
     final pecore = await _db.getPecore();
     final mapPecore = <int, Map<String, dynamic>>{};
@@ -76,11 +76,14 @@ class _HomeScreenState extends State<HomeScreen> {
       mapMaster[m['tag_id'] as int] = m;
     }
 
+    final slaveMasterByDb = await _db.getUltimoMasterPerSlave();
+
     if (!mounted) return;
     setState(() {
       _numeroMaster = numeroMaster;
       _pecore = mapPecore;
       _master = mapMaster;
+      _slaveMasterByDb = slaveMasterByDb;
     });
   }
 
@@ -184,10 +187,11 @@ class _HomeScreenState extends State<HomeScreen> {
 
   List<_TagEntry> _buildLista() {
     final lista = <_TagEntry>[];
+    final modalitaIbrida = _numeroMaster > 0;
 
     for (final tag in _tags.values) {
       if (tag.isMaster) {
-        if (_numeroMaster >= 1) {
+        if (modalitaIbrida) {
           lista.add(
             _TagEntry(tag: tag, pecora: null, master: _master[tag.tagId]),
           );
@@ -205,7 +209,7 @@ class _HomeScreenState extends State<HomeScreen> {
       }
     }
 
-    if (_numeroMaster >= 1) {
+    if (modalitaIbrida) {
       for (final entry in _master.entries) {
         if (!_tags.containsKey(entry.key)) {
           lista.add(_TagEntry(tag: null, pecora: null, master: entry.value));
@@ -224,9 +228,172 @@ class _HomeScreenState extends State<HomeScreen> {
     return lista;
   }
 
+  List<int> _masterIdsDaMostrare() {
+    final ids = <int>[];
+
+    for (final id in _master.keys) {
+      if (!ids.contains(id)) ids.add(id);
+    }
+
+    for (final tag in _tags.values) {
+      if (tag.isMaster && !ids.contains(tag.tagId)) {
+        ids.add(tag.tagId);
+      }
+    }
+
+    if (_numeroMaster > 0) {
+      for (final id in _slaveMasterByDb.values) {
+        if (!ids.contains(id)) ids.add(id);
+      }
+    }
+
+    return ids;
+  }
+
+  List<int> _slaveIdsSenzaMaster() {
+    final ids = <int>{};
+
+    for (final tag in _tags.values) {
+      if (tag.isSlave) ids.add(tag.tagId);
+    }
+
+    ids.addAll(_pecore.keys);
+    ids.removeWhere(_slaveMasterByDb.containsKey);
+
+    final result = ids.toList();
+    result.sort();
+    return result;
+  }
+
+  Widget _buildSlaveTile(int slaveId, {required bool nested}) {
+    final tag = _tags[slaveId];
+    final pecora = _pecore[slaveId];
+
+    Widget content;
+
+    if (tag != null) {
+      content = TagCard(
+        tag: tag,
+        pecora: pecora,
+        master: null,
+        onAggiornato: _ricaricaDati,
+        onPausaScan: _pausaScanPerGateway,
+        onRiprendiScan: _riprendiScanDopoGateway,
+      );
+    } else if (pecora != null) {
+      content = _CardAssenteSlave(pecora: pecora, onAggiornato: _ricaricaDati);
+    } else {
+      content = const SizedBox.shrink();
+    }
+
+    if (!nested) return content;
+    return Padding(padding: const EdgeInsets.only(left: 16), child: content);
+  }
+
+  Widget _buildMasterTile(int masterId) {
+    final tag = _tags[masterId];
+    final master = _master[masterId] ?? {'tag_id': masterId};
+
+    if (tag != null) {
+      return TagCard(
+        tag: tag,
+        pecora: null,
+        master: _master[masterId],
+        onAggiornato: _ricaricaDati,
+        onPausaScan: _pausaScanPerGateway,
+        onRiprendiScan: _riprendiScanDopoGateway,
+      );
+    }
+
+    return _CardAssenteMaster(master: master, onAggiornato: _ricaricaDati);
+  }
+
   @override
   Widget build(BuildContext context) {
-    final lista = _buildLista();
+    final children = <Widget>[];
+    final modalitaIbrida = _numeroMaster > 0;
+
+    if (modalitaIbrida) {
+      final masterIds = _masterIdsDaMostrare();
+      if (masterIds.isNotEmpty) {
+        children.add(
+          const _SectionHeader(
+            title: 'MASTER',
+            subtitle:
+                'Ogni slave viene agganciato al master più recente nel database',
+          ),
+        );
+        for (final masterId in masterIds) {
+          children.add(_buildMasterTile(masterId));
+
+          final slaveIds =
+              _slaveMasterByDb.entries
+                  .where((entry) => entry.value == masterId)
+                  .map((entry) => entry.key)
+                  .toList()
+                ..sort();
+
+          if (slaveIds.isNotEmpty) {
+            children.add(
+              const Padding(
+                padding: EdgeInsets.only(left: 28, top: 4, bottom: 2),
+                child: Text(
+                  'Slave associati',
+                  style: TextStyle(color: Colors.white38, fontSize: 11),
+                ),
+              ),
+            );
+            for (final slaveId in slaveIds) {
+              children.add(_buildSlaveTile(slaveId, nested: true));
+            }
+          }
+
+          children.add(const SizedBox(height: 6));
+        }
+      }
+
+      final slavesSenzaMaster = _slaveIdsSenzaMaster();
+      if (slavesSenzaMaster.isNotEmpty) {
+        children.add(
+          const _SectionHeader(
+            title: 'TELEFONO / NON ASSEGNATI',
+            subtitle:
+                'Slave ancora non agganciati a nessun master nel database',
+          ),
+        );
+        for (final slaveId in slavesSenzaMaster) {
+          children.add(_buildSlaveTile(slaveId, nested: false));
+        }
+      }
+    } else {
+      final slaves = _slaveIdsSenzaMaster();
+      if (slaves.isNotEmpty) {
+        children.add(
+          const _SectionHeader(
+            title: 'GATEWAY / TELEFONO',
+            subtitle:
+                'Il telefono è il root operativo quando non ci sono master',
+          ),
+        );
+        for (final slaveId in slaves) {
+          children.add(_buildSlaveTile(slaveId, nested: false));
+        }
+      }
+    }
+
+    if (children.isEmpty) {
+      children.add(
+        const Center(
+          child: Padding(
+            padding: EdgeInsets.only(top: 48),
+            child: Text(
+              'Nessun TAG rilevato...',
+              style: TextStyle(color: Colors.white54),
+            ),
+          ),
+        ),
+      );
+    }
 
     return Scaffold(
       backgroundColor: const Color(0xFF0A1A0F),
@@ -261,46 +428,40 @@ class _HomeScreenState extends State<HomeScreen> {
           ),
         ],
       ),
-      body: lista.isEmpty
-          ? const Center(
-              child: Text(
-                'Nessun TAG rilevato...',
-                style: TextStyle(color: Colors.white54),
-              ),
-            )
-          : ListView.builder(
-              itemCount: lista.length,
-              itemBuilder: (context, index) {
-                final entry = lista[index];
+      body: ListView(children: children),
+    );
+  }
+}
 
-                if (entry.tag != null) {
-                  return TagCard(
-                    tag: entry.tag!,
-                    pecora: entry.pecora,
-                    master: entry.master,
-                    onAggiornato: _ricaricaDati,
-                    onPausaScan: _pausaScanPerGateway,
-                    onRiprendiScan: _riprendiScanDopoGateway,
-                  );
-                }
+class _SectionHeader extends StatelessWidget {
+  final String title;
+  final String subtitle;
 
-                if (entry.pecora != null) {
-                  return _CardAssenteSlave(
-                    pecora: entry.pecora!,
-                    onAggiornato: _ricaricaDati,
-                  );
-                }
+  const _SectionHeader({required this.title, required this.subtitle});
 
-                if (entry.master != null) {
-                  return _CardAssenteMaster(
-                    master: entry.master!,
-                    onAggiornato: _ricaricaDati,
-                  );
-                }
-
-                return const SizedBox.shrink();
-              },
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 12, 16, 6),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            title,
+            style: const TextStyle(
+              color: Color(0xFF2DFF6E),
+              fontSize: 12,
+              fontWeight: FontWeight.bold,
+              letterSpacing: 1.2,
             ),
+          ),
+          const SizedBox(height: 2),
+          Text(
+            subtitle,
+            style: const TextStyle(color: Colors.white38, fontSize: 11),
+          ),
+        ],
+      ),
     );
   }
 }
@@ -419,6 +580,7 @@ class _CardAssenteMaster extends StatelessWidget {
                   () {}, // Funzione vuota: non blocca la scansione generale
               onRiprendiScan:
                   () {}, // Funzione vuota: nessun effetto sulla scansione
+              onAggiornato: onAggiornato,
             ),
           ),
         );

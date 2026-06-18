@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import '../services/gateway_service.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
@@ -10,6 +12,7 @@ class DettaglioMasterScreen extends StatefulWidget {
   final Map<String, dynamic>? master;
   final VoidCallback onPausaScan;
   final VoidCallback onRiprendiScan;
+  final VoidCallback onAggiornato;
 
   const DettaglioMasterScreen({
     super.key,
@@ -17,6 +20,7 @@ class DettaglioMasterScreen extends StatefulWidget {
     this.master,
     required this.onPausaScan,
     required this.onRiprendiScan,
+    required this.onAggiornato,
   });
 
   @override
@@ -24,6 +28,10 @@ class DettaglioMasterScreen extends StatefulWidget {
 }
 
 class _DettaglioMasterScreenState extends State<DettaglioMasterScreen> {
+  static const Duration _gatewayWindow = kDebugMode
+      ? Duration(minutes: 1)
+      : Duration(minutes: 5);
+
   final _db = DatabaseService();
   late TextEditingController _nomeController;
   late TextEditingController _rfidController;
@@ -33,6 +41,7 @@ class _DettaglioMasterScreenState extends State<DettaglioMasterScreen> {
   final _gatewayService = GatewayService();
   bool _scaricando = false;
   String _statusMessage = '';
+  Timer? _countdownTimer;
 
   @override
   void initState() {
@@ -46,14 +55,39 @@ class _DettaglioMasterScreenState extends State<DettaglioMasterScreen> {
     _noteController = TextEditingController(
       text: widget.master?['note'] as String? ?? '',
     );
+
+    _countdownTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (mounted) setState(() {});
+    });
   }
 
   @override
   void dispose() {
+    _countdownTimer?.cancel();
     _nomeController.dispose();
     _rfidController.dispose();
     _noteController.dispose();
     super.dispose();
+  }
+
+  Duration get _tempoResiduoGateway {
+    final nextWindow = widget.tag.lastSeen.add(_gatewayWindow);
+    final remaining = nextWindow.difference(DateTime.now());
+    return remaining.isNegative ? Duration.zero : remaining;
+  }
+
+  bool get _gatewayDisponibile => _tempoResiduoGateway == Duration.zero;
+
+  String _formattaDurata(Duration durata) {
+    final totalSeconds = durata.inSeconds;
+    final minutes = totalSeconds ~/ 60;
+    final seconds = totalSeconds % 60;
+    return '${minutes.toString().padLeft(2, '0')}:${seconds.toString().padLeft(2, '0')}';
+  }
+
+  String _messaggioGateway() {
+    if (_gatewayDisponibile) return 'Disponibile ora';
+    return 'Tra ${_formattaDurata(_tempoResiduoGateway)}';
   }
 
   Future<void> _salva() async {
@@ -130,6 +164,18 @@ class _DettaglioMasterScreenState extends State<DettaglioMasterScreen> {
   }
 
   Future<void> _avviaDownload() async {
+    if (!_gatewayDisponibile) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            'Troppo presto: prova tra ${_formattaDurata(_tempoResiduoGateway)}.',
+          ),
+          backgroundColor: Colors.orange,
+        ),
+      );
+      return;
+    }
+
     widget.onPausaScan();
     await Future.delayed(const Duration(milliseconds: 500));
 
@@ -147,6 +193,7 @@ class _DettaglioMasterScreenState extends State<DettaglioMasterScreen> {
       );
 
       await _db.salvaDatiGateway(records);
+      widget.onAggiornato();
 
       if (mounted) {
         setState(() => _scaricando = false);
@@ -234,51 +281,6 @@ class _DettaglioMasterScreenState extends State<DettaglioMasterScreen> {
                         _infoTile('🌡️', '${tag.temperature}°C', 'Temp'),
                       ],
                     ),
-                  ],
-                ),
-              ),
-            ),
-            const SizedBox(height: 12),
-
-            Card(
-              color: const Color(0xFF0F1F3D),
-              child: Padding(
-                padding: const EdgeInsets.all(16),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    const Text(
-                      'GPS',
-                      style: TextStyle(
-                        color: Colors.white38,
-                        fontSize: 11,
-                        letterSpacing: 1.5,
-                      ),
-                    ),
-                    const SizedBox(height: 12),
-                    _debugRow(
-                      'Fix GPS',
-                      tag.gpsValid ? '✅ Attivo' : '❌ No fix',
-                    ),
-                    if (tag.latitude != null)
-                      _debugRow('Latitudine', tag.latitude!.toStringAsFixed(6)),
-                    if (tag.longitude != null)
-                      _debugRow(
-                        'Longitudine',
-                        tag.longitude!.toStringAsFixed(6),
-                      ),
-                    if (!tag.gpsValid)
-                      const Padding(
-                        padding: EdgeInsets.only(top: 8),
-                        child: Text(
-                          'Coordinate storiche - ultimo fix noto',
-                          style: TextStyle(
-                            color: Colors.white30,
-                            fontSize: 11,
-                            fontStyle: FontStyle.italic,
-                          ),
-                        ),
-                      ),
                   ],
                 ),
               ),
@@ -438,43 +440,7 @@ class _DettaglioMasterScreenState extends State<DettaglioMasterScreen> {
             Card(
               color: const Color(0xFF0F1F3D),
               child: Padding(
-                padding: const EdgeInsets.all(16),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    const Text(
-                      'DEBUG',
-                      style: TextStyle(
-                        color: Colors.white38,
-                        fontSize: 11,
-                        letterSpacing: 1.5,
-                      ),
-                    ),
-                    const SizedBox(height: 12),
-                    _debugRow('Master ID', tag.tagIdHex),
-                    _debugRow('Boot count', '${tag.bootCount}'),
-                    _debugRow('TX count', '${tag.rxCount}'),
-                    _debugRow('Segnale', '${tag.rssi} dBm'),
-                    _debugRow(
-                      'Flags',
-                      '0b${tag.flags.toRadixString(2).padLeft(8, '0')}',
-                    ),
-                    _debugRow(
-                      'Ultimo contatto',
-                      '${tag.lastSeen.hour.toString().padLeft(2, '0')}:'
-                          '${tag.lastSeen.minute.toString().padLeft(2, '0')}:'
-                          '${tag.lastSeen.second.toString().padLeft(2, '0')}',
-                    ),
-                  ],
-                ),
-              ),
-            ),
-            const SizedBox(height: 12),
-
-            Card(
-              color: const Color(0xFF0F1F3D),
-              child: Padding(
-                padding: const EdgeInsets.all(16),
+                padding: const EdgeInsets.all(14),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
@@ -508,15 +474,110 @@ class _DettaglioMasterScreenState extends State<DettaglioMasterScreen> {
                       SizedBox(
                         width: double.infinity,
                         child: ElevatedButton.icon(
-                          onPressed: _avviaDownload,
+                          onPressed: _gatewayDisponibile
+                              ? _avviaDownload
+                              : null,
                           icon: const Icon(Icons.download),
-                          label: const Text('ATTIVA GATEWAY E SCARICA'),
+                          label: Text(
+                            _gatewayDisponibile
+                                ? 'ATTIVA GATEWAY E SCARICA'
+                                : 'ATTENDI FINESTRA GATEWAY (${_formattaDurata(_tempoResiduoGateway)})',
+                            textAlign: TextAlign.center,
+                          ),
                           style: ElevatedButton.styleFrom(
                             backgroundColor: const Color(0xFF2D9BFF),
                             foregroundColor: Colors.white,
                           ),
                         ),
                       ),
+                  ],
+                ),
+              ),
+            ),
+            const SizedBox(height: 12),
+
+            Card(
+              color: const Color(0xFF0F1F3D),
+              child: Padding(
+                padding: const EdgeInsets.all(12),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text(
+                      'DEBUG',
+                      style: TextStyle(
+                        color: Colors.white38,
+                        fontSize: 11,
+                        letterSpacing: 1.5,
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    _debugRow('Master ID', tag.tagIdHex),
+                    _debugRow('Boot count', '${tag.bootCount}'),
+                    _debugRow('TX count', '${tag.rxCount}'),
+                    _debugRow('Segnale', '${tag.rssi} dBm'),
+                    _debugRow(
+                      'Ultimo contatto',
+                      '${tag.lastSeen.hour.toString().padLeft(2, '0')}:'
+                          '${tag.lastSeen.minute.toString().padLeft(2, '0')}:'
+                          '${tag.lastSeen.second.toString().padLeft(2, '0')}',
+                    ),
+                    const SizedBox(height: 4),
+                    _debugRow('Finestra gateway', _messaggioGateway()),
+                  ],
+                ),
+              ),
+            ),
+            const SizedBox(height: 12),
+
+            Card(
+              color: const Color(0xFF0F1F3D),
+              child: Padding(
+                padding: const EdgeInsets.all(16),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text(
+                      'GPS',
+                      style: TextStyle(
+                        color: Colors.white38,
+                        fontSize: 11,
+                        letterSpacing: 1.5,
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    _debugRow(
+                      'Fix GPS',
+                      tag.gpsValid ? '✅ Attivo' : '❌ No fix',
+                    ),
+                    if (tag.latitude != null)
+                      _debugRow('Latitudine', tag.latitude!.toStringAsFixed(6)),
+                    if (tag.longitude != null)
+                      _debugRow(
+                        'Longitudine',
+                        tag.longitude!.toStringAsFixed(6),
+                      ),
+                    if (!tag.gpsValid)
+                      const Padding(
+                        padding: EdgeInsets.only(top: 8),
+                        child: Text(
+                          'Coordinate storiche - ultimo fix noto',
+                          style: TextStyle(
+                            color: Colors.white30,
+                            fontSize: 11,
+                            fontStyle: FontStyle.italic,
+                          ),
+                        ),
+                      ),
+                    const SizedBox(height: 8),
+                    const Text(
+                      'Il download gateway resta disponibile anche senza fix GPS: la finestra viene stimata con l\'orologio del telefono.',
+                      style: TextStyle(
+                        color: Colors.white38,
+                        fontSize: 11,
+                        height: 1.3,
+                      ),
+                    ),
                   ],
                 ),
               ),
@@ -550,20 +611,30 @@ class _DettaglioMasterScreenState extends State<DettaglioMasterScreen> {
 
   Widget _debugRow(String label, String valore) {
     return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 4),
+      padding: const EdgeInsets.symmetric(vertical: 2),
       child: Row(
         mainAxisAlignment: MainAxisAlignment.spaceBetween,
         children: [
-          Text(
-            label,
-            style: const TextStyle(color: Colors.white54, fontSize: 13),
+          Flexible(
+            child: Text(
+              label,
+              style: const TextStyle(color: Colors.white54, fontSize: 12),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            ),
           ),
-          Text(
-            valore,
-            style: const TextStyle(
-              color: Colors.white,
-              fontSize: 13,
-              fontFamily: 'monospace',
+          const SizedBox(width: 12),
+          Flexible(
+            child: Text(
+              valore,
+              textAlign: TextAlign.end,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(
+                color: Colors.white,
+                fontSize: 12,
+                fontFamily: 'monospace',
+              ),
             ),
           ),
         ],
