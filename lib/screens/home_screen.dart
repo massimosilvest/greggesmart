@@ -1,6 +1,8 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
+import 'package:flutter_map/flutter_map.dart';
+import 'package:latlong2/latlong.dart';
 import 'package:permission_handler/permission_handler.dart';
 import '../services/ble_scanner.dart';
 import '../services/database_service.dart';
@@ -105,6 +107,22 @@ class _HomeScreenState extends State<HomeScreen> {
 
   Future<void> _ricaricaDati() async {
     await _caricaTuttiDati();
+  }
+
+  Future<void> _apriDettaglioMaster(TagDevice tag) async {
+    final result = await Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => DettaglioMasterScreen(
+          tag: tag,
+          master: _master[tag.tagId],
+          onPausaScan: _pausaScanPerGateway,
+          onRiprendiScan: _riprendiScanDopoGateway,
+          onAggiornato: _ricaricaDati,
+        ),
+      ),
+    );
+    if (result == true) _ricaricaDati();
   }
 
   Future<void> _requestAndScan() async {
@@ -447,21 +465,7 @@ class _HomeScreenState extends State<HomeScreen> {
     final slaveCount = _numeroSlaveAssociati(tag.tagId);
 
     return GestureDetector(
-      onTap: () async {
-        final result = await Navigator.push(
-          context,
-          MaterialPageRoute(
-            builder: (_) => DettaglioMasterScreen(
-              tag: tag,
-              master: _master[tag.tagId],
-              onPausaScan: _pausaScanPerGateway,
-              onRiprendiScan: _riprendiScanDopoGateway,
-              onAggiornato: _ricaricaDati,
-            ),
-          ),
-        );
-        if (result == true) _ricaricaDati();
-      },
+      onTap: () => _apriDettaglioMaster(tag),
       child: Card(
         color: const Color(0xFF0F1F3D),
         margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 5),
@@ -534,21 +538,141 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
+  List<TagDevice> _mastersConGps() {
+    final masters = _tags.values
+        .where(
+          (tag) =>
+              tag.isMaster &&
+              tag.gpsValid &&
+              tag.latitude != null &&
+              tag.longitude != null,
+        )
+        .toList();
+    masters.sort((a, b) => b.lastSeen.compareTo(a.lastSeen));
+    return masters;
+  }
+
+  LatLng _centroMappa(List<TagDevice> masters) {
+    if (masters.isEmpty) {
+      return const LatLng(41.9028, 12.4964);
+    }
+
+    var sommaLat = 0.0;
+    var sommaLon = 0.0;
+    for (final tag in masters) {
+      sommaLat += tag.latitude!;
+      sommaLon += tag.longitude!;
+    }
+
+    return LatLng(sommaLat / masters.length, sommaLon / masters.length);
+  }
+
+  List<Marker> _markersMappa(List<TagDevice> masters) {
+    return masters.map((tag) {
+      final punto = LatLng(tag.latitude!, tag.longitude!);
+      final colore = tag.gatewayMode ? Colors.amber : const Color(0xFF2DFF6E);
+
+      return Marker(
+        point: punto,
+        width: 56,
+        height: 56,
+        child: GestureDetector(
+          onTap: () => _apriDettaglioMaster(tag),
+          child: Container(
+            decoration: BoxDecoration(
+              color: colore.withOpacity(0.92),
+              shape: BoxShape.circle,
+              boxShadow: const [
+                BoxShadow(
+                  color: Colors.black45,
+                  blurRadius: 10,
+                  offset: Offset(0, 4),
+                ),
+              ],
+            ),
+            child: Icon(
+              tag.gatewayMode ? Icons.place : Icons.pets,
+              color: const Color(0xFF0A1A0F),
+              size: 28,
+            ),
+          ),
+        ),
+      );
+    }).toList();
+  }
+
   Widget _buildMapTab() {
     final masters = _tags.values.where((tag) => tag.isMaster).toList()
       ..sort((a, b) => b.lastSeen.compareTo(a.lastSeen));
+    final mastersConGps = _mastersConGps();
+    final centro = _centroMappa(mastersConGps);
 
     final children = <Widget>[
       const _SectionHeader(
         title: 'MAPPA GPS',
-        subtitle:
-            'Vista semplificata dei master con posizione e numero di slave',
+        subtitle: 'Mappa reale con i master che hanno un fix GPS valido',
       ),
       const Padding(
         padding: EdgeInsets.fromLTRB(16, 0, 16, 8),
         child: Text(
-          'Qui teniamo i soli master come riferimento geografico. Più avanti potremo sostituire questa vista con una mappa vera.',
+          'La mappa usa OpenStreetMap tramite flutter_map: niente chiavi, niente vendor lock-in.',
           style: TextStyle(color: Colors.white38, fontSize: 11),
+        ),
+      ),
+      Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 12),
+        child: ClipRRect(
+          borderRadius: BorderRadius.circular(16),
+          child: SizedBox(
+            height: 320,
+            child: Stack(
+              children: [
+                FlutterMap(
+                  options: MapOptions(
+                    initialCenter: centro,
+                    initialZoom: mastersConGps.length > 1 ? 12.0 : 14.0,
+                  ),
+                  children: [
+                    TileLayer(
+                      urlTemplate:
+                          'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+                      userAgentPackageName: 'com.greggesmart.app',
+                    ),
+                    MarkerLayer(markers: _markersMappa(mastersConGps)),
+                    const RichAttributionWidget(
+                      attributions: [
+                        TextSourceAttribution('OpenStreetMap contributors'),
+                      ],
+                    ),
+                  ],
+                ),
+                if (mastersConGps.isEmpty)
+                  Container(
+                    color: Colors.black.withOpacity(0.35),
+                    alignment: Alignment.center,
+                    child: const Padding(
+                      padding: EdgeInsets.all(16),
+                      child: Text(
+                        'Nessun master con GPS valido al momento.',
+                        textAlign: TextAlign.center,
+                        style: TextStyle(
+                          color: Colors.white70,
+                          fontSize: 13,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+          ),
+        ),
+      ),
+      Padding(
+        padding: const EdgeInsets.fromLTRB(16, 10, 16, 4),
+        child: Text(
+          'Master live: ${masters.length}  |  Con GPS valido: ${mastersConGps.length}',
+          style: const TextStyle(color: Colors.white54, fontSize: 12),
         ),
       ),
     ];
@@ -557,9 +681,9 @@ class _HomeScreenState extends State<HomeScreen> {
       children.add(
         const Center(
           child: Padding(
-            padding: EdgeInsets.only(top: 48),
+            padding: EdgeInsets.fromLTRB(16, 28, 16, 8),
             child: Text(
-              'Nessun master live con GPS...',
+              'Nessun master live al momento.',
               style: TextStyle(color: Colors.white54),
             ),
           ),
