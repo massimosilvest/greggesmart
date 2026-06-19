@@ -21,9 +21,18 @@ class DatabaseService {
 
     final db = await openDatabase(
       path,
-      version: 4,
+      version: 5,
       onCreate: (db, version) async {
         await _creaTabelle(db);
+      },
+      onUpgrade: (db, oldVersion, newVersion) async {
+        if (oldVersion < 5) {
+          final info = await db.rawQuery('PRAGMA table_info(storico)');
+          final hasImportedAt = info.any((row) => row['name'] == 'imported_at');
+          if (!hasImportedAt) {
+            await db.execute('ALTER TABLE storico ADD COLUMN imported_at TEXT');
+          }
+        }
       },
     );
 
@@ -48,6 +57,7 @@ class DatabaseService {
         tag_id INTEGER NOT NULL,
         master_id INTEGER,
         timestamp TEXT NOT NULL,
+        imported_at TEXT,
         boot_count INTEGER NOT NULL,
         battery_pct INTEGER NOT NULL,
         battery_mv INTEGER NOT NULL,
@@ -254,6 +264,7 @@ class DatabaseService {
         'tag_id': r['tag_id'],
         'master_id': r['master_id'],
         'timestamp': ts.toIso8601String(),
+        'imported_at': DateTime.now().toIso8601String(),
         'boot_count': 0,
         'battery_pct': r['battery_pct'],
         'battery_mv': 0,
@@ -266,10 +277,10 @@ class DatabaseService {
   Future<Map<int, int>> getUltimoMasterPerSlave() async {
     final db = await database;
     final rows = await db.rawQuery('''
-      SELECT tag_id, master_id, timestamp
+      SELECT tag_id, master_id, COALESCE(imported_at, timestamp) AS effective_time
       FROM storico
       WHERE master_id IS NOT NULL
-      ORDER BY timestamp DESC
+      ORDER BY effective_time DESC, id DESC
     ''');
 
     final mappa = <int, int>{};

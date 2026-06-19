@@ -29,6 +29,7 @@ class _HomeScreenState extends State<HomeScreen> {
   bool _bluetoothOn = true;
   Timer? _refreshTimer;
   int _numeroMaster = 0;
+  int _selectedTabIndex = 0;
 
   @override
   void initState() {
@@ -185,49 +186,6 @@ class _HomeScreenState extends State<HomeScreen> {
     super.dispose();
   }
 
-  List<_TagEntry> _buildLista() {
-    final lista = <_TagEntry>[];
-    final modalitaIbrida = _numeroMaster > 0;
-
-    for (final tag in _tags.values) {
-      if (tag.isMaster) {
-        if (modalitaIbrida) {
-          lista.add(
-            _TagEntry(tag: tag, pecora: null, master: _master[tag.tagId]),
-          );
-        }
-      } else {
-        lista.add(
-          _TagEntry(tag: tag, pecora: _pecore[tag.tagId], master: null),
-        );
-      }
-    }
-
-    for (final entry in _pecore.entries) {
-      if (!_tags.containsKey(entry.key)) {
-        lista.add(_TagEntry(tag: null, pecora: entry.value, master: null));
-      }
-    }
-
-    if (modalitaIbrida) {
-      for (final entry in _master.entries) {
-        if (!_tags.containsKey(entry.key)) {
-          lista.add(_TagEntry(tag: null, pecora: null, master: entry.value));
-        }
-      }
-    }
-
-    lista.sort((a, b) {
-      final aMaster = a.tag?.isMaster ?? (a.master != null);
-      final bMaster = b.tag?.isMaster ?? (b.master != null);
-      if (aMaster && !bMaster) return -1;
-      if (!aMaster && bMaster) return 1;
-      return b.statoOrdine.compareTo(a.statoOrdine);
-    });
-
-    return lista;
-  }
-
   List<int> _masterIdsDaMostrare() {
     final ids = <int>[];
 
@@ -290,6 +248,37 @@ class _HomeScreenState extends State<HomeScreen> {
     return Padding(padding: const EdgeInsets.only(left: 16), child: content);
   }
 
+  Widget _batteryIcon(TagDevice tag) {
+    IconData icon;
+    Color color;
+
+    if (tag.isBatCritical) {
+      icon = Icons.battery_alert;
+      color = Colors.red;
+    } else if (tag.isBatLow) {
+      icon = Icons.battery_2_bar;
+      color = Colors.orange;
+    } else if (tag.batteryPct > 75) {
+      icon = Icons.battery_full;
+      color = const Color(0xFF2DFF6E);
+    } else {
+      icon = Icons.battery_4_bar;
+      color = const Color(0xFF2DFF6E);
+    }
+
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Icon(icon, color: color, size: 18),
+        const SizedBox(width: 3),
+        Text(
+          '${tag.batteryPct}%',
+          style: TextStyle(color: color, fontSize: 13),
+        ),
+      ],
+    );
+  }
+
   Widget _buildMasterTile(int masterId) {
     final tag = _tags[masterId];
     final master = _master[masterId] ?? {'tag_id': masterId};
@@ -308,8 +297,64 @@ class _HomeScreenState extends State<HomeScreen> {
     return _CardAssenteMaster(master: master, onAggiornato: _ricaricaDati);
   }
 
-  @override
-  Widget build(BuildContext context) {
+  List<TagDevice> _liveTagsOrdinati() {
+    final tags = _tags.values.toList();
+    tags.sort((a, b) => b.lastSeen.compareTo(a.lastSeen));
+    return tags;
+  }
+
+  int _numeroSlaveAssociati(int masterId) {
+    return _slaveMasterByDb.values.where((id) => id == masterId).length;
+  }
+
+  Widget _buildLiveTab() {
+    final tags = _liveTagsOrdinati();
+
+    final children = <Widget>[
+      const _SectionHeader(
+        title: 'LIVE BLE',
+        subtitle: 'Segnali in tempo reale, senza logica ad albero',
+      ),
+      const Padding(
+        padding: EdgeInsets.fromLTRB(16, 0, 16, 8),
+        child: Text(
+          'Qui vedi tutto quello che l\'antenna riceve ora: è la vista utile per cercare una pecora nel gregge.',
+          style: TextStyle(color: Colors.white38, fontSize: 11),
+        ),
+      ),
+    ];
+
+    if (tags.isEmpty) {
+      children.add(
+        const Center(
+          child: Padding(
+            padding: EdgeInsets.only(top: 48),
+            child: Text(
+              'Nessun TAG in live...',
+              style: TextStyle(color: Colors.white54),
+            ),
+          ),
+        ),
+      );
+    } else {
+      for (final tag in tags) {
+        children.add(
+          TagCard(
+            tag: tag,
+            pecora: _pecore[tag.tagId],
+            master: _master[tag.tagId],
+            onAggiornato: _ricaricaDati,
+            onPausaScan: _pausaScanPerGateway,
+            onRiprendiScan: _riprendiScanDopoGateway,
+          ),
+        );
+      }
+    }
+
+    return ListView(children: children);
+  }
+
+  Widget _buildTreeTab() {
     final children = <Widget>[];
     final modalitaIbrida = _numeroMaster > 0;
 
@@ -318,9 +363,8 @@ class _HomeScreenState extends State<HomeScreen> {
       if (masterIds.isNotEmpty) {
         children.add(
           const _SectionHeader(
-            title: 'MASTER',
-            subtitle:
-                'Ogni slave viene agganciato al master più recente nel database',
+            title: 'ALBERO DATABASE',
+            subtitle: 'Relazione ricostruita dopo il download dal master',
           ),
         );
         for (final masterId in masterIds) {
@@ -357,8 +401,7 @@ class _HomeScreenState extends State<HomeScreen> {
         children.add(
           const _SectionHeader(
             title: 'TELEFONO / NON ASSEGNATI',
-            subtitle:
-                'Slave ancora non agganciati a nessun master nel database',
+            subtitle: 'Slave presenti nel database ma non agganciati',
           ),
         );
         for (final slaveId in slavesSenzaMaster) {
@@ -371,8 +414,7 @@ class _HomeScreenState extends State<HomeScreen> {
         children.add(
           const _SectionHeader(
             title: 'GATEWAY / TELEFONO',
-            subtitle:
-                'Il telefono è il root operativo quando non ci sono master',
+            subtitle: 'Modalità senza master: il telefono è il root operativo',
           ),
         );
         for (final slaveId in slaves) {
@@ -387,7 +429,7 @@ class _HomeScreenState extends State<HomeScreen> {
           child: Padding(
             padding: EdgeInsets.only(top: 48),
             child: Text(
-              'Nessun TAG rilevato...',
+              'Nessun dato nel database...',
               style: TextStyle(color: Colors.white54),
             ),
           ),
@@ -395,12 +437,154 @@ class _HomeScreenState extends State<HomeScreen> {
       );
     }
 
+    return ListView(children: children);
+  }
+
+  Widget _buildMapTile(TagDevice tag) {
+    final nome = _master[tag.tagId]?['nome'] as String? ?? tag.tagIdHex;
+    final distanza = BleUtils.distanzaStringa(tag.rssi);
+    final stato = BleUtils.statoMaster(tag.lastSeen);
+    final slaveCount = _numeroSlaveAssociati(tag.tagId);
+
+    return GestureDetector(
+      onTap: () async {
+        final result = await Navigator.push(
+          context,
+          MaterialPageRoute(
+            builder: (_) => DettaglioMasterScreen(
+              tag: tag,
+              master: _master[tag.tagId],
+              onPausaScan: _pausaScanPerGateway,
+              onRiprendiScan: _riprendiScanDopoGateway,
+              onAggiornato: _ricaricaDati,
+            ),
+          ),
+        );
+        if (result == true) _ricaricaDati();
+      },
+      child: Card(
+        color: const Color(0xFF0F1F3D),
+        margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 5),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+          child: Row(
+            children: [
+              Column(
+                children: [
+                  Icon(
+                    tag.gatewayMode ? Icons.place : Icons.hub,
+                    color: tag.gatewayMode ? Colors.amber : stato.color,
+                    size: 28,
+                  ),
+                  Text(stato.emoji, style: const TextStyle(fontSize: 10)),
+                ],
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      nome,
+                      style: TextStyle(
+                        color: stato.color,
+                        fontSize: 16,
+                        fontWeight: FontWeight.bold,
+                      ),
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                    Text(
+                      tag.gpsValid
+                          ? 'GPS: ${tag.latitude?.toStringAsFixed(4)}, ${tag.longitude?.toStringAsFixed(4)}'
+                          : 'GPS: no fix',
+                      style: TextStyle(
+                        color: tag.gpsValid ? Colors.white54 : Colors.white30,
+                        fontSize: 11,
+                      ),
+                    ),
+                    Text(
+                      'Slave agganciati: $slaveCount',
+                      style: const TextStyle(
+                        color: Colors.white38,
+                        fontSize: 11,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              Column(
+                crossAxisAlignment: CrossAxisAlignment.end,
+                children: [
+                  _batteryIcon(tag),
+                  const SizedBox(height: 4),
+                  Text(
+                    distanza,
+                    style: const TextStyle(
+                      color: Colors.white70,
+                      fontSize: 13,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildMapTab() {
+    final masters = _tags.values.where((tag) => tag.isMaster).toList()
+      ..sort((a, b) => b.lastSeen.compareTo(a.lastSeen));
+
+    final children = <Widget>[
+      const _SectionHeader(
+        title: 'MAPPA GPS',
+        subtitle:
+            'Vista semplificata dei master con posizione e numero di slave',
+      ),
+      const Padding(
+        padding: EdgeInsets.fromLTRB(16, 0, 16, 8),
+        child: Text(
+          'Qui teniamo i soli master come riferimento geografico. Più avanti potremo sostituire questa vista con una mappa vera.',
+          style: TextStyle(color: Colors.white38, fontSize: 11),
+        ),
+      ),
+    ];
+
+    if (masters.isEmpty) {
+      children.add(
+        const Center(
+          child: Padding(
+            padding: EdgeInsets.only(top: 48),
+            child: Text(
+              'Nessun master live con GPS...',
+              style: TextStyle(color: Colors.white54),
+            ),
+          ),
+        ),
+      );
+    } else {
+      for (final tag in masters) {
+        children.add(_buildMapTile(tag));
+      }
+    }
+
+    return ListView(children: children);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final tabTitles = ['Live BLE', 'Albero', 'Mappa'];
+    final tabIcons = [Icons.radar, Icons.account_tree, Icons.map];
+
     return Scaffold(
       backgroundColor: const Color(0xFF0A1A0F),
       appBar: AppBar(
         backgroundColor: const Color(0xFF0F2318),
-        title: const Text(
-          'Gregge Smart',
+        title: Text(
+          tabTitles[_selectedTabIndex],
           style: TextStyle(color: Color(0xFF2DFF6E)),
         ),
         actions: [
@@ -428,7 +612,24 @@ class _HomeScreenState extends State<HomeScreen> {
           ),
         ],
       ),
-      body: ListView(children: children),
+      body: IndexedStack(
+        index: _selectedTabIndex,
+        children: [_buildLiveTab(), _buildTreeTab(), _buildMapTab()],
+      ),
+      bottomNavigationBar: BottomNavigationBar(
+        currentIndex: _selectedTabIndex,
+        onTap: (index) => setState(() => _selectedTabIndex = index),
+        backgroundColor: const Color(0xFF0F2318),
+        selectedItemColor: const Color(0xFF2DFF6E),
+        unselectedItemColor: Colors.white54,
+        items: List.generate(
+          tabTitles.length,
+          (index) => BottomNavigationBarItem(
+            icon: Icon(tabIcons[index]),
+            label: tabTitles[index],
+          ),
+        ),
+      ),
     );
   }
 }
