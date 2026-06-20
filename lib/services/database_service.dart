@@ -21,7 +21,7 @@ class DatabaseService {
 
     final db = await openDatabase(
       path,
-      version: 5,
+      version: 6,
       onCreate: (db, version) async {
         await _creaTabelle(db);
       },
@@ -33,10 +33,29 @@ class DatabaseService {
             await db.execute('ALTER TABLE storico ADD COLUMN imported_at TEXT');
           }
         }
+
+        if (oldVersion < 6) {
+          final info = await db.rawQuery('PRAGMA table_info(storico)');
+          final hasLatitude = info.any((row) => row['name'] == 'latitude');
+          final hasLongitude = info.any((row) => row['name'] == 'longitude');
+          final hasGpsValid = info.any((row) => row['name'] == 'gps_valid');
+          if (!hasLatitude) {
+            await db.execute('ALTER TABLE storico ADD COLUMN latitude REAL');
+          }
+          if (!hasLongitude) {
+            await db.execute('ALTER TABLE storico ADD COLUMN longitude REAL');
+          }
+          if (!hasGpsValid) {
+            await db.execute(
+              'ALTER TABLE storico ADD COLUMN gps_valid INTEGER DEFAULT 0',
+            );
+          }
+        }
       },
     );
 
     await _assicuraColonnaMasterId(db);
+    await _assicuraColonneStoricoGps(db);
     return db;
   }
 
@@ -58,6 +77,9 @@ class DatabaseService {
         master_id INTEGER,
         timestamp TEXT NOT NULL,
         imported_at TEXT,
+        latitude REAL,
+        longitude REAL,
+        gps_valid INTEGER DEFAULT 0,
         boot_count INTEGER NOT NULL,
         battery_pct INTEGER NOT NULL,
         battery_mv INTEGER NOT NULL,
@@ -133,11 +155,33 @@ class DatabaseService {
     }
   }
 
+  Future<void> _assicuraColonneStoricoGps(Database db) async {
+    final info = await db.rawQuery('PRAGMA table_info(storico)');
+    final hasLatitude = info.any((row) => row['name'] == 'latitude');
+    final hasLongitude = info.any((row) => row['name'] == 'longitude');
+    final hasGpsValid = info.any((row) => row['name'] == 'gps_valid');
+
+    if (!hasLatitude) {
+      await db.execute('ALTER TABLE storico ADD COLUMN latitude REAL');
+    }
+    if (!hasLongitude) {
+      await db.execute('ALTER TABLE storico ADD COLUMN longitude REAL');
+    }
+    if (!hasGpsValid) {
+      await db.execute(
+        'ALTER TABLE storico ADD COLUMN gps_valid INTEGER DEFAULT 0',
+      );
+    }
+  }
+
   // ── STORICO ─────────────────────────────────────────
 
   Future<void> salvaTrasmissione({
     required int tagId,
     int? masterId,
+    double? latitude,
+    double? longitude,
+    bool gpsValid = false,
     required int bootCount,
     required int batteryPct,
     required int batteryMv,
@@ -149,6 +193,9 @@ class DatabaseService {
       'tag_id': tagId,
       'master_id': masterId,
       'timestamp': DateTime.now().toIso8601String(),
+      'latitude': latitude,
+      'longitude': longitude,
+      'gps_valid': gpsValid ? 1 : 0,
       'boot_count': bootCount,
       'battery_pct': batteryPct,
       'battery_mv': batteryMv,
@@ -256,15 +303,25 @@ class DatabaseService {
 
   Future<void> salvaDatiGateway(List<Map<String, dynamic>> records) async {
     final db = await database;
+    final importedAt = DateTime.now().toIso8601String();
+
     for (final r in records) {
+      final rawMasterId = r['master_id'];
+      final masterId = rawMasterId is int
+          ? (rawMasterId > 0 ? rawMasterId : null)
+          : int.tryParse('$rawMasterId');
+
       final ts = DateTime.fromMillisecondsSinceEpoch(
         (r['timestamp'] as int) * 1000,
       );
       await db.insert('storico', {
         'tag_id': r['tag_id'],
-        'master_id': r['master_id'],
+        'master_id': (masterId != null && masterId > 0) ? masterId : null,
         'timestamp': ts.toIso8601String(),
-        'imported_at': DateTime.now().toIso8601String(),
+        'imported_at': importedAt,
+        'latitude': r['latitude'],
+        'longitude': r['longitude'],
+        'gps_valid': (r['gps_valid'] == true) ? 1 : 0,
         'boot_count': 0,
         'battery_pct': r['battery_pct'],
         'battery_mv': 0,
@@ -277,10 +334,16 @@ class DatabaseService {
   Future<Map<int, int>> getUltimoMasterPerSlave() async {
     final db = await database;
     final rows = await db.rawQuery('''
-      SELECT tag_id, master_id, COALESCE(imported_at, timestamp) AS effective_time
+      SELECT tag_id, master_id, rssi, imported_at, timestamp, gps_valid
       FROM storico
-      WHERE master_id IS NOT NULL
-      ORDER BY effective_time DESC, id DESC
+      WHERE master_id IS NOT NULL AND master_id > 0
+      ORDER BY
+        tag_id ASC,
+        COALESCE(gps_valid, 0) DESC,
+        COALESCE(imported_at, timestamp) DESC,
+        timestamp DESC,
+        rssi DESC,
+        id DESC
     ''');
 
     final mappa = <int, int>{};
@@ -291,5 +354,44 @@ class DatabaseService {
       mappa.putIfAbsent(tagId, () => masterId);
     }
     return mappa;
+  }
+
+  Future<List<Map<String, dynamic>>> getStoricoTracciaGps({
+    required DateTime from,
+    required DateTime to,
+    int? tagId,
+  }) async {
+    final db = await database;
+    final args = <Object?>[from.toIso8601String(), to.toIso8601String()];
+    final where = StringBuffer('''
+      s.timestamp >= ?
+      AND s.timestamp <= ?
+      AND COALESCE(s.gps_valid, 0) = 1
+      AND s.latitude IS NOT NULL
+      AND s.longitude IS NOT NULL
+    ''');
+
+    if (tagId != null) {
+      where.write(' AND s.tag_id = ?');
+      args.add(tagId);
+    }
+
+    return db.rawQuery('''
+      SELECT
+        s.id,
+        s.tag_id,
+        s.master_id,
+        s.timestamp,
+        s.latitude,
+        s.longitude,
+        s.rssi,
+        p.nome AS pecora_nome,
+        m.nome AS master_nome
+      FROM storico s
+      LEFT JOIN pecore p ON p.tag_id = s.tag_id
+      LEFT JOIN master m ON m.tag_id = s.master_id
+      WHERE ${where.toString()}
+      ORDER BY s.timestamp ASC, s.id ASC
+      ''', args);
   }
 }

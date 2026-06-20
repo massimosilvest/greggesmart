@@ -16,28 +16,42 @@ class GatewayService {
     onStatus("Ricerca master nelle vicinanze...");
 
     BluetoothDevice? targetDevice;
+    final foundTarget = Completer<void>();
     final masterIdHex = masterId.toRadixString(16).toLowerCase();
+    var devicesSeen = 0;
+    final ultimiNomi = <String>[];
     debugPrint('DEBUG: cerco master con hex: $masterIdHex');
-    onStatus('Cerca device con nome che contenga $masterIdHex');
+    onStatus(
+      'Scansione BLE avviata (target master: 0x${masterId.toRadixString(16).toUpperCase()})',
+    );
 
     final subscription = FlutterBluePlus.scanResults.listen((results) {
       for (final r in results) {
         final name = r.device.platformName;
         final remoteId = r.device.remoteId.toString();
         final normalizedRemoteId = remoteId.replaceAll(':', '').toLowerCase();
+        final normalizedName = name.toLowerCase();
         final manufacturerKeys = r.advertisementData.manufacturerData.keys
             .map((k) => '0x${k.toRadixString(16)}')
             .join(', ');
+
+        devicesSeen++;
+        final label = name.isNotEmpty ? name : remoteId;
+        ultimiNomi.remove(label);
+        ultimiNomi.add(label);
+        if (ultimiNomi.length > 4) {
+          ultimiNomi.removeAt(0);
+        }
 
         debugPrint(
           'DEBUG: candidate device name="$name" id=$remoteId mfg=[$manufacturerKeys]',
         );
 
-        if (name.isNotEmpty) {
-          onStatus('Visto $name');
-        }
+        onStatus(
+          'Scansione BLE: $devicesSeen visti (${ultimiNomi.join(' | ')})',
+        );
 
-        final matchesName = name.toLowerCase().contains(masterIdHex);
+        final matchesName = normalizedName.contains(masterIdHex);
         final matchesAddress = normalizedRemoteId.contains(masterIdHex);
 
         if (matchesName || matchesAddress) {
@@ -48,6 +62,10 @@ class GatewayService {
                 : 'Master trovato: $remoteId',
           );
           targetDevice = r.device;
+          if (!foundTarget.isCompleted) {
+            foundTarget.complete();
+          }
+          break;
         }
       }
     });
@@ -55,7 +73,7 @@ class GatewayService {
     await FlutterBluePlus.stopScan();
     await Future.delayed(const Duration(milliseconds: 500));
     await FlutterBluePlus.startScan(timeout: _scanTimeout);
-    await Future.delayed(_scanTimeout);
+    await Future.any([foundTarget.future, Future.delayed(_scanTimeout)]);
     await FlutterBluePlus.stopScan();
     await subscription.cancel();
 

@@ -1,3 +1,4 @@
+import 'package:geolocator/geolocator.dart';
 import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
@@ -6,10 +7,12 @@ import 'package:latlong2/latlong.dart';
 import 'package:permission_handler/permission_handler.dart';
 import '../services/ble_scanner.dart';
 import '../services/database_service.dart';
+import '../services/gateway_service.dart';
 import '../models/tag_device.dart';
 import '../widgets/tag_card.dart';
 import '../utils/ble_utils.dart';
 import 'associa_screen.dart';
+import 'database_viewer_screen.dart';
 import 'dettaglio_master_screen.dart';
 import 'impostazioni_screen.dart';
 
@@ -21,6 +24,11 @@ class HomeScreen extends StatefulWidget {
 }
 
 class _HomeScreenState extends State<HomeScreen> {
+  final MapController _mapController = MapController();
+  StreamSubscription<Position>? _phonePositionSub;
+  bool _mappaInizializzata = false;
+  bool _mapReady = false;
+  bool _centroInizialeRisolto = false;
   final BleScanner _scanner = BleScanner();
   final DatabaseService _db = DatabaseService();
   Map<int, TagDevice> _tags = {};
@@ -32,10 +40,26 @@ class _HomeScreenState extends State<HomeScreen> {
   Timer? _refreshTimer;
   int _numeroMaster = 0;
   int _selectedTabIndex = 0;
+  int _dataModeIndex = 0;
+  int _mapModeIndex = 0;
+  DateTime _giornoStorico = DateTime.now();
+  bool _storicoLoading = false;
+  List<Map<String, dynamic>> _storicoPunti = [];
+  int? _storicoTagFilter;
+  bool _downloadInProgress = false;
+  Timer? _downloadTimeout;
+
+  static const String _cfgPhoneLat = 'last_phone_lat';
+  static const String _cfgPhoneLon = 'last_phone_lon';
+  static const String _cfgMasterLat = 'last_master_lat';
+  static const String _cfgMasterLon = 'last_master_lon';
+  static const int _liveSlaveTimeoutSeconds = 120;
 
   @override
   void initState() {
     super.initState();
+    _inizializzaCentroMappa();
+    _avviaTrackingPosizionePastore();
 
     FlutterBluePlus.adapterState.listen((state) {
       if (!mounted) return;
@@ -51,10 +75,13 @@ class _HomeScreenState extends State<HomeScreen> {
     _scanner.tagsStream.listen((tags) {
       if (!mounted) return;
       setState(() => _tags = tags);
+      _aggiornaFallbackMasterDaLive(tags);
+      _tryApplyInitialMapCenter();
       _aggiornaDati(tags.keys.toList());
     });
 
     _caricaTuttiDati();
+    _caricaTracciaStorico();
     _requestAndScan();
 
     _refreshTimer = Timer.periodic(const Duration(seconds: 30), (_) {
@@ -107,6 +134,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
   Future<void> _ricaricaDati() async {
     await _caricaTuttiDati();
+    await _caricaTracciaStorico();
   }
 
   Future<void> _apriDettaglioMaster(TagDevice tag) async {
@@ -199,9 +227,51 @@ class _HomeScreenState extends State<HomeScreen> {
 
   @override
   void dispose() {
+    _phonePositionSub?.cancel();
     _refreshTimer?.cancel();
+    _downloadTimeout?.cancel();
     _scanner.dispose();
     super.dispose();
+  }
+
+  Future<void> _avviaTrackingPosizionePastore() async {
+    try {
+      var permesso = await Geolocator.checkPermission();
+      if (permesso == LocationPermission.denied) {
+        permesso = await Geolocator.requestPermission();
+      }
+
+      final gpsConsentito =
+          permesso == LocationPermission.always ||
+          permesso == LocationPermission.whileInUse;
+      if (!gpsConsentito) return;
+
+      final servizioAttivo = await Geolocator.isLocationServiceEnabled();
+      if (!servizioAttivo) return;
+
+      await _phonePositionSub?.cancel();
+      _phonePositionSub =
+          Geolocator.getPositionStream(
+            locationSettings: const LocationSettings(
+              accuracy: LocationAccuracy.high,
+              distanceFilter: 5,
+            ),
+          ).listen((pos) {
+            if (!mounted) return;
+            final nuovaPos = LatLng(pos.latitude, pos.longitude);
+
+            setState(() => _centroFallback = nuovaPos);
+            unawaited(
+              _salvaPosizioneConfig(
+                keyLat: _cfgPhoneLat,
+                keyLon: _cfgPhoneLon,
+                pos: nuovaPos,
+              ),
+            );
+          });
+    } catch (e) {
+      debugPrint('Errore tracking posizione pastore: $e');
+    }
   }
 
   List<int> _masterIdsDaMostrare() {
@@ -321,8 +391,148 @@ class _HomeScreenState extends State<HomeScreen> {
     return tags;
   }
 
-  int _numeroSlaveAssociati(int masterId) {
-    return _slaveMasterByDb.values.where((id) => id == masterId).length;
+  int? _selezionaMateriMiglioreDaLive() {
+    final masterLive = _tags.values.where((tag) => tag.isMaster).toList();
+    if (masterLive.isEmpty) return null;
+
+    masterLive.sort((a, b) => a.rssi.compareTo(b.rssi));
+    return masterLive.last.tagId;
+  }
+
+  Future<void> _scaricaDaGatewayUnificato() async {
+    if (_downloadInProgress) return;
+
+    final masterId = _selezionaMateriMiglioreDaLive();
+    if (masterId == null) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Nessun master live visibile'),
+            duration: Duration(seconds: 2),
+          ),
+        );
+      }
+      return;
+    }
+
+    if (!mounted) return;
+    final statusNotifier = ValueNotifier<String>('Avvio download...');
+    var dialogAperto = false;
+
+    void closeDialogIfOpen() {
+      if (!dialogAperto || !mounted) return;
+      final navigator = Navigator.of(context, rootNavigator: true);
+      if (navigator.canPop()) {
+        navigator.pop();
+      }
+      dialogAperto = false;
+    }
+
+    setState(() {
+      _downloadInProgress = true;
+    });
+
+    _pausaScanPerGateway();
+
+    dialogAperto = true;
+    showDialog(
+      context: context,
+      useRootNavigator: true,
+      barrierDismissible: false,
+      builder: (dialogContext) => AlertDialog(
+        backgroundColor: const Color(0xFF0F2318),
+        title: const Text(
+          'Download Gateway',
+          style: TextStyle(color: Color(0xFF2DFF6E)),
+        ),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const CircularProgressIndicator(color: Color(0xFF2D9BFF)),
+            const SizedBox(height: 16),
+            ValueListenableBuilder<String>(
+              valueListenable: statusNotifier,
+              builder: (context, value, _) => Text(
+                value,
+                textAlign: TextAlign.center,
+                style: const TextStyle(color: Colors.white70, fontSize: 13),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+
+    _downloadTimeout = Timer(const Duration(minutes: 5), () {
+      if (mounted) {
+        closeDialogIfOpen();
+        setState(() => _downloadInProgress = false);
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Download scaduto dopo 5 minuti'),
+            backgroundColor: Colors.orange,
+            duration: Duration(seconds: 3),
+          ),
+        );
+      }
+    });
+
+    try {
+      final gateway = GatewayService();
+      final records = await gateway.scaricaDaGateway(
+        masterId: masterId,
+        onStatus: (status) {
+          if (!mounted) return;
+          statusNotifier.value = status;
+        },
+      );
+
+      if (!mounted) return;
+      _downloadTimeout?.cancel();
+
+      await _db.salvaDatiGateway(records);
+      await _ricaricaDati();
+      final slaveAssociati = _slaveMasterByDb.values
+          .where((id) => id == masterId)
+          .length;
+
+      closeDialogIfOpen();
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              records.isEmpty
+                  ? 'Download completato: 0 record (nessun nuovo dato).'
+                  : 'Scaricati ${records.length} record. Slave ora associati a questo master: $slaveAssociati',
+            ),
+            backgroundColor: records.isEmpty ? Colors.orange : Colors.green,
+            duration: const Duration(seconds: 3),
+          ),
+        );
+      }
+    } catch (e) {
+      debugPrint('Errore download gateway: $e');
+      if (mounted) {
+        closeDialogIfOpen();
+        _downloadTimeout?.cancel();
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Errore: $e'),
+            backgroundColor: Colors.red,
+            duration: const Duration(seconds: 3),
+          ),
+        );
+      }
+    } finally {
+      _downloadTimeout?.cancel();
+      if (mounted) {
+        closeDialogIfOpen();
+        setState(() => _downloadInProgress = false);
+      }
+      _riprendiScanDopoGateway();
+      statusNotifier.dispose();
+    }
   }
 
   Widget _buildLiveTab() {
@@ -462,7 +672,7 @@ class _HomeScreenState extends State<HomeScreen> {
     final nome = _master[tag.tagId]?['nome'] as String? ?? tag.tagIdHex;
     final distanza = BleUtils.distanzaStringa(tag.rssi);
     final stato = BleUtils.statoMaster(tag.lastSeen);
-    final slaveCount = _numeroSlaveAssociati(tag.tagId);
+    final slaveLiveCount = _numeroSlaveLivePerMaster(tag.tagId);
 
     return GestureDetector(
       onTap: () => _apriDettaglioMaster(tag),
@@ -507,7 +717,7 @@ class _HomeScreenState extends State<HomeScreen> {
                       ),
                     ),
                     Text(
-                      'Slave agganciati: $slaveCount',
+                      'Slave live rilevati: $slaveLiveCount',
                       style: const TextStyle(
                         color: Colors.white38,
                         fontSize: 11,
@@ -552,70 +762,363 @@ class _HomeScreenState extends State<HomeScreen> {
     return masters;
   }
 
-  LatLng _centroMappa(List<TagDevice> masters) {
-    if (masters.isEmpty) {
-      return const LatLng(41.9028, 12.4964);
-    }
-
-    var sommaLat = 0.0;
-    var sommaLon = 0.0;
-    for (final tag in masters) {
-      sommaLat += tag.latitude!;
-      sommaLon += tag.longitude!;
-    }
-
-    return LatLng(sommaLat / masters.length, sommaLon / masters.length);
+  List<TagDevice> _slaveLive() {
+    final now = DateTime.now();
+    final slaves = _tags.values
+        .where((tag) => tag.isSlave)
+        .where(
+          (tag) =>
+              now.difference(tag.lastSeen).inSeconds <=
+              _liveSlaveTimeoutSeconds,
+        )
+        .toList();
+    slaves.sort((a, b) => b.lastSeen.compareTo(a.lastSeen));
+    return slaves;
   }
 
-  List<Marker> _markersMappa(List<TagDevice> masters) {
-    return masters.map((tag) {
-      final punto = LatLng(tag.latitude!, tag.longitude!);
-      final colore = tag.gatewayMode ? Colors.amber : const Color(0xFF2DFF6E);
+  int _numeroSlaveLivePerMaster(int masterId) {
+    final now = DateTime.now();
+    var count = 0;
 
-      return Marker(
-        point: punto,
-        width: 56,
-        height: 56,
-        child: GestureDetector(
-          onTap: () => _apriDettaglioMaster(tag),
+    for (final entry in _slaveMasterByDb.entries) {
+      if (entry.value != masterId) continue;
+      final slaveTag = _tags[entry.key];
+      if (slaveTag == null || !slaveTag.isSlave) continue;
+
+      final fresh =
+          now.difference(slaveTag.lastSeen).inSeconds <=
+          _liveSlaveTimeoutSeconds;
+      if (fresh) count++;
+    }
+
+    return count;
+  }
+
+  DateTime _inizioGiorno(DateTime date) {
+    return DateTime(date.year, date.month, date.day);
+  }
+
+  DateTime _fineGiorno(DateTime date) {
+    final inizio = _inizioGiorno(date);
+    return inizio
+        .add(const Duration(days: 1))
+        .subtract(const Duration(milliseconds: 1));
+  }
+
+  Future<void> _caricaTracciaStorico() async {
+    if (!mounted) return;
+    setState(() => _storicoLoading = true);
+
+    try {
+      final from = _inizioGiorno(_giornoStorico);
+      final to = _fineGiorno(_giornoStorico);
+      final punti = await _db.getStoricoTracciaGps(from: from, to: to);
+
+      if (!mounted) return;
+      setState(() {
+        _storicoPunti = punti;
+        final idsDisponibili = _storicoTagDisponibili();
+        if (_storicoTagFilter != null &&
+            !idsDisponibili.contains(_storicoTagFilter)) {
+          _storicoTagFilter = null;
+        }
+      });
+    } catch (e) {
+      debugPrint('Errore caricamento traccia storica: $e');
+    } finally {
+      if (mounted) {
+        setState(() => _storicoLoading = false);
+      }
+    }
+  }
+
+  List<int> _storicoTagDisponibili() {
+    final ids = <int>{};
+    for (final row in _storicoPunti) {
+      final id = row['tag_id'] as int?;
+      if (id != null) ids.add(id);
+    }
+    final list = ids.toList()..sort();
+    return list;
+  }
+
+  List<Map<String, dynamic>> _storicoPuntiFiltrati() {
+    if (_storicoTagFilter == null) return _storicoPunti;
+    return _storicoPunti
+        .where((row) => row['tag_id'] == _storicoTagFilter)
+        .toList();
+  }
+
+  Future<void> _scegliGiornoStorico() async {
+    final picked = await showDatePicker(
+      context: context,
+      initialDate: _giornoStorico,
+      firstDate: DateTime.now().subtract(const Duration(days: 365)),
+      lastDate: DateTime.now().add(const Duration(days: 1)),
+    );
+
+    if (picked == null || !mounted) return;
+    setState(() => _giornoStorico = picked);
+    await _caricaTracciaStorico();
+  }
+
+  LatLng? _centroFallback;
+  LatLng? _centroMasterFallback;
+
+  Future<LatLng?> _leggiPosizioneDaConfig(String keyLat, String keyLon) async {
+    final latStr = await _db.getConfigurazione(keyLat);
+    final lonStr = await _db.getConfigurazione(keyLon);
+    final lat = double.tryParse(latStr ?? '');
+    final lon = double.tryParse(lonStr ?? '');
+    if (lat == null || lon == null) return null;
+    return LatLng(lat, lon);
+  }
+
+  Future<void> _salvaPosizioneConfig({
+    required String keyLat,
+    required String keyLon,
+    required LatLng pos,
+  }) async {
+    await _db.salvaConfigurazione(keyLat, pos.latitude.toString());
+    await _db.salvaConfigurazione(keyLon, pos.longitude.toString());
+  }
+
+  Future<void> _inizializzaCentroMappa() async {
+    LatLng? posizioneTelefono;
+    LatLng? posizioneMaster;
+
+    try {
+      var permesso = await Geolocator.checkPermission();
+      if (permesso == LocationPermission.denied) {
+        permesso = await Geolocator.requestPermission();
+      }
+
+      final gpsConsentito =
+          permesso == LocationPermission.always ||
+          permesso == LocationPermission.whileInUse;
+
+      if (gpsConsentito) {
+        final servizioAttivo = await Geolocator.isLocationServiceEnabled();
+        if (servizioAttivo) {
+          try {
+            final pos = await Geolocator.getCurrentPosition(
+              desiredAccuracy: LocationAccuracy.medium,
+              timeLimit: const Duration(seconds: 6),
+            );
+            posizioneTelefono = LatLng(pos.latitude, pos.longitude);
+          } catch (_) {
+            final pos = await Geolocator.getLastKnownPosition();
+            if (pos != null) {
+              posizioneTelefono = LatLng(pos.latitude, pos.longitude);
+            }
+          }
+        }
+      }
+
+      posizioneTelefono ??= await _leggiPosizioneDaConfig(
+        _cfgPhoneLat,
+        _cfgPhoneLon,
+      );
+      posizioneMaster = await _leggiPosizioneDaConfig(
+        _cfgMasterLat,
+        _cfgMasterLon,
+      );
+
+      if (posizioneTelefono != null) {
+        await _salvaPosizioneConfig(
+          keyLat: _cfgPhoneLat,
+          keyLon: _cfgPhoneLon,
+          pos: posizioneTelefono,
+        );
+      }
+    } catch (e) {
+      debugPrint('Errore inizializzazione centro mappa: $e');
+      posizioneTelefono ??= await _leggiPosizioneDaConfig(
+        _cfgPhoneLat,
+        _cfgPhoneLon,
+      );
+      posizioneMaster ??= await _leggiPosizioneDaConfig(
+        _cfgMasterLat,
+        _cfgMasterLon,
+      );
+    }
+
+    if (!mounted) return;
+    setState(() {
+      _centroFallback = posizioneTelefono;
+      _centroMasterFallback = posizioneMaster;
+      _centroInizialeRisolto = true;
+    });
+    _tryApplyInitialMapCenter();
+  }
+
+  void _aggiornaFallbackMasterDaLive(Map<int, TagDevice> tags) {
+    final mastersConGps =
+        tags.values
+            .where(
+              (tag) =>
+                  tag.isMaster &&
+                  tag.gpsValid &&
+                  tag.latitude != null &&
+                  tag.longitude != null,
+            )
+            .toList()
+          ..sort((a, b) => b.lastSeen.compareTo(a.lastSeen));
+
+    if (mastersConGps.isEmpty) return;
+
+    final ultimoMaster = mastersConGps.first;
+    final nuovaPosizione = LatLng(
+      ultimoMaster.latitude!,
+      ultimoMaster.longitude!,
+    );
+    final precedente = _centroMasterFallback;
+    final cambiata =
+        precedente == null ||
+        precedente.latitude != nuovaPosizione.latitude ||
+        precedente.longitude != nuovaPosizione.longitude;
+
+    if (cambiata && mounted) {
+      setState(() => _centroMasterFallback = nuovaPosizione);
+      unawaited(
+        _salvaPosizioneConfig(
+          keyLat: _cfgMasterLat,
+          keyLon: _cfgMasterLon,
+          pos: nuovaPosizione,
+        ),
+      );
+    }
+  }
+
+  LatLng _centroMappa() {
+    // Priorita': GPS telefono attuale/ultima nota.
+    if (_centroFallback != null) {
+      return _centroFallback!;
+    }
+
+    // Secondo fallback: ultima posizione nota di un master.
+    if (_centroMasterFallback != null) {
+      return _centroMasterFallback!;
+    }
+
+    // Fallback finale: Roma.
+    return const LatLng(41.9028, 12.4964);
+  }
+
+  double? _raggioRicercaSlaveMetri() {
+    final slaves = _slaveLive();
+    if (slaves.isEmpty) return null;
+
+    final distanze =
+        slaves
+            .map((tag) => BleUtils.stimaDistanza(tag.rssi))
+            .where((d) => d.isFinite && d > 0)
+            .toList()
+          ..sort();
+
+    if (distanze.isEmpty) return null;
+
+    final idx90 = ((distanze.length - 1) * 0.9).round();
+    final p90 = distanze[idx90];
+    final raggio = p90 * 1.25;
+    return raggio.clamp(20.0, 300.0);
+  }
+
+  void _tryApplyInitialMapCenter() {
+    if (!_mapReady || _mappaInizializzata || !_centroInizialeRisolto) {
+      return;
+    }
+
+    final mastersConGps = _mastersConGps();
+    final centro = _centroMappa();
+    final zoom = mastersConGps.length > 1 ? 12.0 : 14.0;
+
+    _mapController.move(centro, zoom);
+
+    if (!mounted) return;
+    setState(() => _mappaInizializzata = true);
+  }
+
+  List<Marker> _markersMappa(List<TagDevice> masters, {LatLng? pastorePos}) {
+    final markers = <Marker>[];
+
+    if (pastorePos != null) {
+      markers.add(
+        Marker(
+          point: pastorePos,
+          width: 44,
+          height: 44,
           child: Container(
+            alignment: Alignment.center,
             decoration: BoxDecoration(
-              color: colore.withOpacity(0.92),
               shape: BoxShape.circle,
+              border: Border.all(color: Colors.white, width: 2),
+              color: const Color(0xFF2D9BFF),
               boxShadow: const [
                 BoxShadow(
                   color: Colors.black45,
-                  blurRadius: 10,
-                  offset: Offset(0, 4),
+                  blurRadius: 8,
+                  offset: Offset(0, 3),
                 ),
               ],
             ),
-            child: Icon(
-              tag.gatewayMode ? Icons.place : Icons.pets,
-              color: const Color(0xFF0A1A0F),
-              size: 28,
-            ),
+            child: const Icon(Icons.person_pin_circle, color: Colors.white),
           ),
         ),
       );
-    }).toList();
+    }
+
+    markers.addAll(
+      masters.map((tag) {
+        final punto = LatLng(tag.latitude!, tag.longitude!);
+        final colore = tag.gatewayMode ? Colors.amber : const Color(0xFF2DFF6E);
+
+        return Marker(
+          point: punto,
+          width: 56,
+          height: 56,
+          child: GestureDetector(
+            onTap: () => _apriDettaglioMaster(tag),
+            child: Container(
+              decoration: BoxDecoration(
+                color: colore.withOpacity(0.92),
+                shape: BoxShape.circle,
+                boxShadow: const [
+                  BoxShadow(
+                    color: Colors.black45,
+                    blurRadius: 10,
+                    offset: Offset(0, 4),
+                  ),
+                ],
+              ),
+              child: Icon(
+                tag.gatewayMode ? Icons.place : Icons.pets,
+                color: const Color(0xFF0A1A0F),
+                size: 28,
+              ),
+            ),
+          ),
+        );
+      }),
+    );
+
+    return markers;
   }
 
-  Widget _buildMapTab() {
+  Widget _buildMappaLive() {
     final masters = _tags.values.where((tag) => tag.isMaster).toList()
       ..sort((a, b) => b.lastSeen.compareTo(a.lastSeen));
     final mastersConGps = _mastersConGps();
-    final centro = _centroMappa(mastersConGps);
+    final slavesLive = _slaveLive();
+    final centro = _centroMappa();
+    final pastorePos = _centroFallback;
+    final raggioRicerca = _raggioRicercaSlaveMetri();
 
     final children = <Widget>[
-      const _SectionHeader(
-        title: 'MAPPA GPS',
-        subtitle: 'Mappa reale con i master che hanno un fix GPS valido',
-      ),
       const Padding(
         padding: EdgeInsets.fromLTRB(16, 0, 16, 8),
         child: Text(
-          'La mappa usa OpenStreetMap tramite flutter_map: niente chiavi, niente vendor lock-in.',
+          'Mappa operativa in tempo reale: usa i dati live BLE per ricerca sul campo.',
           style: TextStyle(color: Colors.white38, fontSize: 11),
         ),
       ),
@@ -628,9 +1131,14 @@ class _HomeScreenState extends State<HomeScreen> {
             child: Stack(
               children: [
                 FlutterMap(
+                  mapController: _mapController,
                   options: MapOptions(
                     initialCenter: centro,
                     initialZoom: mastersConGps.length > 1 ? 12.0 : 14.0,
+                    onMapReady: () {
+                      _mapReady = true;
+                      _tryApplyInitialMapCenter();
+                    },
                   ),
                   children: [
                     TileLayer(
@@ -638,7 +1146,25 @@ class _HomeScreenState extends State<HomeScreen> {
                           'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
                       userAgentPackageName: 'com.greggesmart.app',
                     ),
-                    MarkerLayer(markers: _markersMappa(mastersConGps)),
+                    if (pastorePos != null && raggioRicerca != null)
+                      CircleLayer(
+                        circles: [
+                          CircleMarker(
+                            point: pastorePos,
+                            radius: raggioRicerca,
+                            useRadiusInMeter: true,
+                            color: const Color(0xFF2D9BFF).withOpacity(0.18),
+                            borderColor: const Color(0xFF2D9BFF),
+                            borderStrokeWidth: 2,
+                          ),
+                        ],
+                      ),
+                    MarkerLayer(
+                      markers: _markersMappa(
+                        mastersConGps,
+                        pastorePos: pastorePos,
+                      ),
+                    ),
                     const RichAttributionWidget(
                       attributions: [
                         TextSourceAttribution('OpenStreetMap contributors'),
@@ -671,7 +1197,16 @@ class _HomeScreenState extends State<HomeScreen> {
       Padding(
         padding: const EdgeInsets.fromLTRB(16, 10, 16, 4),
         child: Text(
-          'Master live: ${masters.length}  |  Con GPS valido: ${mastersConGps.length}',
+          'Pastore: ${pastorePos != null ? 'visibile' : 'no fix'}  |  Master live: ${masters.length}  |  Con GPS valido: ${mastersConGps.length}',
+          style: const TextStyle(color: Colors.white54, fontSize: 12),
+        ),
+      ),
+      Padding(
+        padding: const EdgeInsets.fromLTRB(16, 0, 16, 4),
+        child: Text(
+          raggioRicerca != null
+              ? 'Raggio ricerca slave (RSSI live): ~${raggioRicerca.round()} m  |  Slave live: ${slavesLive.length}'
+              : 'Raggio ricerca slave non disponibile (serve almeno 1 slave live).',
           style: const TextStyle(color: Colors.white54, fontSize: 12),
         ),
       ),
@@ -695,22 +1230,284 @@ class _HomeScreenState extends State<HomeScreen> {
       }
     }
 
-    return ListView(children: children);
+    return Column(children: children);
+  }
+
+  Widget _buildMappaStorico() {
+    final puntiFiltrati = _storicoPuntiFiltrati();
+    final latLngPunti = puntiFiltrati
+        .map((row) {
+          final latRaw = row['latitude'];
+          final lonRaw = row['longitude'];
+          final lat = latRaw is num
+              ? latRaw.toDouble()
+              : double.tryParse('$latRaw');
+          final lon = lonRaw is num
+              ? lonRaw.toDouble()
+              : double.tryParse('$lonRaw');
+          if (lat == null || lon == null) return null;
+          return LatLng(lat, lon);
+        })
+        .whereType<LatLng>()
+        .toList();
+
+    final centro = latLngPunti.isNotEmpty ? latLngPunti.first : _centroMappa();
+    final tagDisponibili = _storicoTagDisponibili();
+
+    return Column(
+      children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
+          child: Row(
+            children: [
+              Expanded(
+                child: OutlinedButton.icon(
+                  onPressed: _scegliGiornoStorico,
+                  icon: const Icon(Icons.calendar_today, size: 16),
+                  label: Text(
+                    '${_giornoStorico.day.toString().padLeft(2, '0')}/${_giornoStorico.month.toString().padLeft(2, '0')}/${_giornoStorico.year}',
+                  ),
+                ),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: DropdownButtonFormField<int?>(
+                  value: _storicoTagFilter,
+                  dropdownColor: const Color(0xFF0F2318),
+                  decoration: const InputDecoration(
+                    isDense: true,
+                    border: OutlineInputBorder(),
+                    contentPadding: EdgeInsets.symmetric(
+                      horizontal: 10,
+                      vertical: 10,
+                    ),
+                  ),
+                  style: const TextStyle(color: Colors.white),
+                  items: [
+                    const DropdownMenuItem<int?>(
+                      value: null,
+                      child: Text('Tutti i tag'),
+                    ),
+                    ...tagDisponibili.map(
+                      (id) => DropdownMenuItem<int?>(
+                        value: id,
+                        child: Text('Tag $id'),
+                      ),
+                    ),
+                  ],
+                  onChanged: (value) {
+                    setState(() => _storicoTagFilter = value);
+                  },
+                ),
+              ),
+            ],
+          ),
+        ),
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 12),
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(16),
+            child: SizedBox(
+              height: 320,
+              child: Stack(
+                children: [
+                  FlutterMap(
+                    options: MapOptions(
+                      initialCenter: centro,
+                      initialZoom: latLngPunti.length > 4 ? 13 : 14,
+                    ),
+                    children: [
+                      TileLayer(
+                        urlTemplate:
+                            'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+                        userAgentPackageName: 'com.greggesmart.app',
+                      ),
+                      if (latLngPunti.length >= 2)
+                        PolylineLayer(
+                          polylines: [
+                            Polyline(
+                              points: latLngPunti,
+                              color: const Color(0xFFFFB703),
+                              strokeWidth: 4,
+                            ),
+                          ],
+                        ),
+                      if (latLngPunti.isNotEmpty)
+                        MarkerLayer(
+                          markers: [
+                            Marker(
+                              point: latLngPunti.first,
+                              width: 42,
+                              height: 42,
+                              child: const Icon(
+                                Icons.play_circle_fill,
+                                color: Color(0xFF2DFF6E),
+                                size: 34,
+                              ),
+                            ),
+                            Marker(
+                              point: latLngPunti.last,
+                              width: 42,
+                              height: 42,
+                              child: const Icon(
+                                Icons.flag_circle,
+                                color: Color(0xFFFF5D5D),
+                                size: 34,
+                              ),
+                            ),
+                          ],
+                        ),
+                      const RichAttributionWidget(
+                        attributions: [
+                          TextSourceAttribution('OpenStreetMap contributors'),
+                        ],
+                      ),
+                    ],
+                  ),
+                  if (_storicoLoading)
+                    Container(
+                      color: Colors.black.withOpacity(0.35),
+                      alignment: Alignment.center,
+                      child: const CircularProgressIndicator(),
+                    ),
+                  if (!_storicoLoading && latLngPunti.isEmpty)
+                    Container(
+                      color: Colors.black.withOpacity(0.35),
+                      alignment: Alignment.center,
+                      child: const Padding(
+                        padding: EdgeInsets.all(16),
+                        child: Text(
+                          'Nessuna traccia GPS storica per questo giorno/filtro.',
+                          textAlign: TextAlign.center,
+                          style: TextStyle(color: Colors.white70, fontSize: 13),
+                        ),
+                      ),
+                    ),
+                ],
+              ),
+            ),
+          ),
+        ),
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 10, 16, 4),
+          child: Text(
+            'Punti traccia: ${latLngPunti.length}  |  Giorno: ${_giornoStorico.day.toString().padLeft(2, '0')}/${_giornoStorico.month.toString().padLeft(2, '0')}/${_giornoStorico.year}',
+            style: const TextStyle(color: Colors.white54, fontSize: 12),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildMapTab() {
+    return ListView(
+      children: [
+        const _SectionHeader(
+          title: 'MAPPA GPS',
+          subtitle: 'Live operativo e storico tracciato separati',
+        ),
+        Padding(
+          padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
+          child: SegmentedButton<int>(
+            segments: const [
+              ButtonSegment<int>(
+                value: 0,
+                label: Text('Live'),
+                icon: Icon(Icons.radar),
+              ),
+              ButtonSegment<int>(
+                value: 1,
+                label: Text('Storico'),
+                icon: Icon(Icons.timeline),
+              ),
+            ],
+            selected: {_mapModeIndex},
+            onSelectionChanged: (selection) {
+              setState(() => _mapModeIndex = selection.first);
+              if (selection.first == 1) {
+                _caricaTracciaStorico();
+              }
+            },
+          ),
+        ),
+        if (_mapModeIndex == 0) _buildMappaLive() else _buildMappaStorico(),
+      ],
+    );
+  }
+
+  Widget _buildDataTab() {
+    return Column(
+      children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
+          child: SegmentedButton<int>(
+            segments: const [
+              ButtonSegment<int>(
+                value: 0,
+                label: Text('Live'),
+                icon: Icon(Icons.radar),
+              ),
+              ButtonSegment<int>(
+                value: 1,
+                label: Text('Albero'),
+                icon: Icon(Icons.account_tree),
+              ),
+            ],
+            selected: {_dataModeIndex},
+            onSelectionChanged: (selection) {
+              setState(() => _dataModeIndex = selection.first);
+            },
+          ),
+        ),
+        Expanded(
+          child: IndexedStack(
+            index: _dataModeIndex,
+            children: [_buildLiveTab(), _buildTreeTab()],
+          ),
+        ),
+      ],
+    );
+  }
+
+  Future<void> _onMenuAction(String value) async {
+    if (value == 'settings') {
+      await Navigator.push(
+        context,
+        MaterialPageRoute(builder: (_) => const ImpostazioniScreen()),
+      );
+      _ricaricaDati();
+      return;
+    }
+
+    if (value == 'database') {
+      await Navigator.push(
+        context,
+        MaterialPageRoute(builder: (_) => const DatabaseViewerScreen()),
+      );
+      return;
+    }
+
+    if (value == 'login' && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Login: in arrivo nelle prossime versioni.'),
+          duration: Duration(seconds: 2),
+        ),
+      );
+    }
   }
 
   @override
   Widget build(BuildContext context) {
-    final tabTitles = ['Live BLE', 'Albero', 'Mappa'];
-    final tabIcons = [Icons.radar, Icons.account_tree, Icons.map];
+    final currentTitle = _selectedTabIndex == 0
+        ? (_dataModeIndex == 0 ? 'Live BLE' : 'Albero')
+        : 'Mappa';
 
     return Scaffold(
       backgroundColor: const Color(0xFF0A1A0F),
       appBar: AppBar(
         backgroundColor: const Color(0xFF0F2318),
-        title: Text(
-          tabTitles[_selectedTabIndex],
-          style: TextStyle(color: Color(0xFF2DFF6E)),
-        ),
+        title: Text(currentTitle, style: TextStyle(color: Color(0xFF2DFF6E))),
         actions: [
           Icon(
             _bluetoothOn ? Icons.bluetooth : Icons.bluetooth_disabled,
@@ -718,41 +1515,79 @@ class _HomeScreenState extends State<HomeScreen> {
           ),
           const SizedBox(width: 4),
           IconButton(
-            icon: const Icon(Icons.settings, color: Color(0xFF2DFF6E)),
-            onPressed: () async {
-              await Navigator.push(
-                context,
-                MaterialPageRoute(builder: (_) => const ImpostazioniScreen()),
-              );
-              _ricaricaDati();
-            },
-          ),
-          IconButton(
             icon: Icon(
               _isScanning ? Icons.stop : Icons.play_arrow,
               color: const Color(0xFF2DFF6E),
             ),
             onPressed: _isScanning ? _stopScan : _startScan,
           ),
+          PopupMenuButton<String>(
+            icon: const Icon(Icons.more_vert, color: Color(0xFF2DFF6E)),
+            color: const Color(0xFF0F2318),
+            onSelected: _onMenuAction,
+            itemBuilder: (context) => const [
+              PopupMenuItem<String>(
+                value: 'database',
+                child: Text('Database', style: TextStyle(color: Colors.white)),
+              ),
+              PopupMenuItem<String>(
+                value: 'settings',
+                child: Text(
+                  'Impostazioni',
+                  style: TextStyle(color: Colors.white),
+                ),
+              ),
+              PopupMenuItem<String>(
+                value: 'login',
+                child: Text(
+                  'Login (presto)',
+                  style: TextStyle(color: Colors.white54),
+                ),
+              ),
+            ],
+          ),
         ],
       ),
       body: IndexedStack(
         index: _selectedTabIndex,
-        children: [_buildLiveTab(), _buildTreeTab(), _buildMapTab()],
+        children: [_buildDataTab(), _buildMapTab()],
       ),
       bottomNavigationBar: BottomNavigationBar(
-        currentIndex: _selectedTabIndex,
-        onTap: (index) => setState(() => _selectedTabIndex = index),
+        currentIndex: _selectedTabIndex == 0 ? 0 : 2,
+        onTap: (index) {
+          if (index == 1) {
+            if (!_downloadInProgress) {
+              _scaricaDaGatewayUnificato();
+            }
+          } else {
+            setState(() => _selectedTabIndex = index < 2 ? 0 : 1);
+          }
+        },
         backgroundColor: const Color(0xFF0F2318),
         selectedItemColor: const Color(0xFF2DFF6E),
         unselectedItemColor: Colors.white54,
-        items: List.generate(
-          tabTitles.length,
-          (index) => BottomNavigationBarItem(
-            icon: Icon(tabIcons[index]),
-            label: tabTitles[index],
+        items: [
+          const BottomNavigationBarItem(
+            icon: Icon(Icons.dashboard),
+            label: 'Dati',
           ),
-        ),
+          BottomNavigationBarItem(
+            icon: _downloadInProgress
+                ? const SizedBox(
+                    width: 24,
+                    height: 24,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2,
+                      valueColor: AlwaysStoppedAnimation<Color>(
+                        Color(0xFF2DFF6E),
+                      ),
+                    ),
+                  )
+                : const Icon(Icons.cloud_download),
+            label: 'Aggiorna',
+          ),
+          const BottomNavigationBarItem(icon: Icon(Icons.map), label: 'Mappa'),
+        ],
       ),
     );
   }
@@ -788,23 +1623,6 @@ class _SectionHeader extends StatelessWidget {
         ],
       ),
     );
-  }
-}
-
-class _TagEntry {
-  final TagDevice? tag;
-  final Map<String, dynamic>? pecora;
-  final Map<String, dynamic>? master;
-
-  _TagEntry({required this.tag, required this.pecora, required this.master});
-
-  int get statoOrdine {
-    if (tag == null) return 3;
-    final secondi = DateTime.now().difference(tag!.lastSeen).inSeconds;
-    if (secondi < 60) return 0;
-    if (secondi < 120) return 1;
-    if (secondi < 300) return 2;
-    return 3;
   }
 }
 

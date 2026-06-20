@@ -1,6 +1,5 @@
 import 'dart:async';
 
-import '../services/gateway_service.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
 import '../models/tag_device.dart';
@@ -28,19 +27,12 @@ class DettaglioMasterScreen extends StatefulWidget {
 }
 
 class _DettaglioMasterScreenState extends State<DettaglioMasterScreen> {
-  static const Duration _gatewayWindow = kDebugMode
-      ? Duration(minutes: 1)
-      : Duration(minutes: 5);
-
   final _db = DatabaseService();
   late TextEditingController _nomeController;
   late TextEditingController _rfidController;
   late TextEditingController _noteController;
   bool _saving = false;
   bool _modificaAperta = false;
-  final _gatewayService = GatewayService();
-  bool _scaricando = false;
-  String _statusMessage = '';
   Timer? _countdownTimer;
 
   @override
@@ -68,26 +60,6 @@ class _DettaglioMasterScreenState extends State<DettaglioMasterScreen> {
     _rfidController.dispose();
     _noteController.dispose();
     super.dispose();
-  }
-
-  Duration get _tempoResiduoGateway {
-    final nextWindow = widget.tag.lastSeen.add(_gatewayWindow);
-    final remaining = nextWindow.difference(DateTime.now());
-    return remaining.isNegative ? Duration.zero : remaining;
-  }
-
-  bool get _gatewayDisponibile => _tempoResiduoGateway == Duration.zero;
-
-  String _formattaDurata(Duration durata) {
-    final totalSeconds = durata.inSeconds;
-    final minutes = totalSeconds ~/ 60;
-    final seconds = totalSeconds % 60;
-    return '${minutes.toString().padLeft(2, '0')}:${seconds.toString().padLeft(2, '0')}';
-  }
-
-  String _messaggioGateway() {
-    if (_gatewayDisponibile) return 'Disponibile ora';
-    return 'Tra ${_formattaDurata(_tempoResiduoGateway)}';
   }
 
   Future<void> _salva() async {
@@ -161,62 +133,6 @@ class _DettaglioMasterScreenState extends State<DettaglioMasterScreen> {
       if (!mounted) return;
       Navigator.pop(context, true);
     }
-  }
-
-  Future<void> _avviaDownload() async {
-    if (!_gatewayDisponibile) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(
-            'Troppo presto: prova tra ${_formattaDurata(_tempoResiduoGateway)}.',
-          ),
-          backgroundColor: Colors.orange,
-        ),
-      );
-      return;
-    }
-
-    widget.onPausaScan();
-    await Future.delayed(const Duration(milliseconds: 500));
-
-    setState(() {
-      _scaricando = true;
-      _statusMessage = 'Avvio download master ${widget.tag.tagIdHex}...';
-    });
-
-    try {
-      final records = await _gatewayService.scaricaDaGateway(
-        masterId: widget.tag.tagId,
-        onStatus: (status) {
-          if (mounted) setState(() => _statusMessage = status);
-        },
-      );
-
-      await _db.salvaDatiGateway(records);
-      widget.onAggiornato();
-
-      if (mounted) {
-        setState(() => _scaricando = false);
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Scaricati ${records.length} record!'),
-            backgroundColor: Colors.green,
-          ),
-        );
-      }
-    } catch (e) {
-      if (mounted) {
-        setState(() {
-          _scaricando = false;
-          _statusMessage = 'Errore: $e';
-        });
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Errore: $e'), backgroundColor: Colors.red),
-        );
-      }
-    }
-
-    widget.onRiprendiScan();
   }
 
   @override
@@ -440,65 +356,6 @@ class _DettaglioMasterScreenState extends State<DettaglioMasterScreen> {
             Card(
               color: const Color(0xFF0F1F3D),
               child: Padding(
-                padding: const EdgeInsets.all(14),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    const Text(
-                      'AZIONI',
-                      style: TextStyle(
-                        color: Colors.white38,
-                        fontSize: 11,
-                        letterSpacing: 1.5,
-                      ),
-                    ),
-                    const SizedBox(height: 12),
-                    if (_scaricando)
-                      Column(
-                        children: [
-                          const CircularProgressIndicator(
-                            color: Color(0xFF2D9BFF),
-                          ),
-                          const SizedBox(height: 12),
-                          Text(
-                            _statusMessage,
-                            style: const TextStyle(
-                              color: Colors.white70,
-                              fontSize: 13,
-                            ),
-                            textAlign: TextAlign.center,
-                          ),
-                        ],
-                      )
-                    else
-                      SizedBox(
-                        width: double.infinity,
-                        child: ElevatedButton.icon(
-                          onPressed: _gatewayDisponibile
-                              ? _avviaDownload
-                              : null,
-                          icon: const Icon(Icons.download),
-                          label: Text(
-                            _gatewayDisponibile
-                                ? 'ATTIVA GATEWAY E SCARICA'
-                                : 'ATTENDI FINESTRA GATEWAY (${_formattaDurata(_tempoResiduoGateway)})',
-                            textAlign: TextAlign.center,
-                          ),
-                          style: ElevatedButton.styleFrom(
-                            backgroundColor: const Color(0xFF2D9BFF),
-                            foregroundColor: Colors.white,
-                          ),
-                        ),
-                      ),
-                  ],
-                ),
-              ),
-            ),
-            const SizedBox(height: 12),
-
-            Card(
-              color: const Color(0xFF0F1F3D),
-              child: Padding(
                 padding: const EdgeInsets.all(12),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
@@ -522,8 +379,6 @@ class _DettaglioMasterScreenState extends State<DettaglioMasterScreen> {
                           '${tag.lastSeen.minute.toString().padLeft(2, '0')}:'
                           '${tag.lastSeen.second.toString().padLeft(2, '0')}',
                     ),
-                    const SizedBox(height: 4),
-                    _debugRow('Finestra gateway', _messaggioGateway()),
                   ],
                 ),
               ),
