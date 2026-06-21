@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
+import '../models/tag_device.dart';
 
 class GatewayService {
   static const String serviceUuid = "6e400001-b5a3-f393-e0a9-e50e24dcca9e";
@@ -8,11 +9,19 @@ class GatewayService {
   static const String dataCharUuid = "6e400003-b5a3-f393-e0a9-e50e24dcca9e";
   static const Duration _scanTimeout = Duration(seconds: 20);
   static const Duration _connectTimeout = Duration(seconds: 30);
+  static const Duration _readChunkPause = Duration(milliseconds: 250);
+  static const int _maxReadCycles = 18;
 
-  Future<List<Map<String, dynamic>>> scaricaDaGateway({
+  Future<GatewayDownloadResult> scaricaDaGateway({
     required int masterId,
+    required int expectedMasterCount,
+    bool allowClearOnPartial = false,
     required void Function(String status) onStatus,
   }) async {
+    debugPrint('=== INIZIO GATEWAY DOWNLOAD ===');
+    debugPrint('Master ID: 0x${masterId.toRadixString(16).toUpperCase()}');
+    debugPrint('Expected Masters: $expectedMasterCount');
+
     onStatus("Ricerca master nelle vicinanze...");
 
     BluetoothDevice? targetDevice;
@@ -31,6 +40,10 @@ class GatewayService {
         final remoteId = r.device.remoteId.toString();
         final normalizedRemoteId = remoteId.replaceAll(':', '').toLowerCase();
         final normalizedName = name.toLowerCase();
+        final rawPayload = r.advertisementData.manufacturerData[0xFFFF];
+        final parsedTag = rawPayload == null
+            ? null
+            : TagDevice.fromManufacturerData(rawPayload, r.rssi);
         final manufacturerKeys = r.advertisementData.manufacturerData.keys
             .map((k) => '0x${k.toRadixString(16)}')
             .join(', ');
@@ -51,10 +64,12 @@ class GatewayService {
           'Scansione BLE: $devicesSeen visti (${ultimiNomi.join(' | ')})',
         );
 
-        final matchesName = normalizedName.contains(masterIdHex);
-        final matchesAddress = normalizedRemoteId.contains(masterIdHex);
+        final matchesPayload =
+            parsedTag != null && parsedTag.isMaster && parsedTag.tagId == masterId;
+        final matchesName = normalizedName.contains('0x$masterIdHex');
+        final matchesAddress = normalizedRemoteId.endsWith(masterIdHex);
 
-        if (matchesName || matchesAddress) {
+        if (matchesPayload || matchesName || matchesAddress) {
           debugPrint('DEBUG: MATCH! device: $name id=$remoteId');
           onStatus(
             name.isNotEmpty
@@ -115,22 +130,103 @@ class GatewayService {
 
     onStatus("Attivazione modalità gateway...");
     await cmdChar.write("GATEWAY_ON".codeUnits, withoutResponse: false);
+    debugPrint('DEBUG: Comando inviato: GATEWAY_ON');
 
     await Future.delayed(const Duration(seconds: 2));
 
     onStatus("Scaricamento dati...");
-    final rawData = await dataChar.read();
-    final dataString = String.fromCharCodes(rawData);
+    final dataString = await _readGatewayDump(dataChar, onStatus);
+    debugPrint('DEBUG: Dump ricevuto (${dataString.length} chars):');
+    debugPrint(dataString);
+    debugPrint('DEBUG: === Fine dump raw ===');
 
     final records = _parseDati(dataString);
+    debugPrint('DEBUG: Record parsati: ${records.length}');
+    for (final r in records) {
+      debugPrint(
+        'DEBUG:   Tag 0x${(r['tag_id'] as int?)?.toRadixString(16).toUpperCase() ?? '?'}'
+        ' -> Master 0x${(r['master_id'] as int?)?.toRadixString(16).toUpperCase() ?? 'null'}'
+        ' | TS: ${r['timestamp']} | GPS: ${r['gps_valid']} @ (${r['latitude']}, ${r['longitude']})',
+      );
+    }
 
-    onStatus("Conferma e pulizia memoria master...");
-    await cmdChar.write("CLEAR_DB".codeUnits, withoutResponse: false);
+    final masterIdsNelDump = records
+        .map((r) => r['master_id'])
+        .whereType<int>()
+        .where((id) => id > 0)
+        .toSet();
+
+    final expected = expectedMasterCount <= 0 ? 1 : expectedMasterCount;
+    final allineatoSuTuttiIMaster = masterIdsNelDump.length >= expected;
+    final canClear = allineatoSuTuttiIMaster || allowClearOnPartial;
+
+    debugPrint('DEBUG: Master IDs nel dump: ${masterIdsNelDump.length}/$expected');
+    debugPrint('DEBUG: canClear: $canClear');
+
+    if (canClear) {
+      onStatus("Conferma e pulizia memoria master...");
+      await cmdChar.write("CLEAR_DB".codeUnits, withoutResponse: false);
+      debugPrint('DEBUG: Comando inviato: CLEAR_DB');
+    } else {
+      onStatus(
+        'Memoria NON azzerata: dump da ${masterIdsNelDump.length}/$expected master.',
+      );
+    }
 
     await targetDevice!.disconnect();
-    onStatus("Download completato! ${records.length} record ricevuti.");
+    debugPrint('=== FINE GATEWAY DOWNLOAD ===\n');
+    onStatus(
+      canClear
+          ? "Download completato! ${records.length} record ricevuti."
+          : "Download completato senza reset memoria (${records.length} record).",
+    );
 
-    return records;
+    return GatewayDownloadResult(
+      records: records,
+      clearSent: canClear,
+      expectedMasterCount: expected,
+      masterIdsInDump: masterIdsNelDump,
+    );
+  }
+
+  Future<String> _readGatewayDump(
+    BluetoothCharacteristic dataChar,
+    void Function(String status) onStatus,
+  ) async {
+    final chunks = <String>[];
+    final seenChunks = <String>{};
+    var cicliSenzaNuovi = 0;
+
+    for (var i = 0; i < _maxReadCycles; i++) {
+      final rawData = await dataChar.read();
+      final chunk = String.fromCharCodes(rawData).trim();
+
+      if (chunk.isEmpty) {
+        cicliSenzaNuovi++;
+      } else {
+        final isNuovo = seenChunks.add(chunk);
+        if (isNuovo) {
+          chunks.add(chunk);
+          cicliSenzaNuovi = 0;
+          onStatus('Scaricamento dati... blocchi ricevuti: ${chunks.length}');
+
+          if (chunk.contains('END') || chunk.contains('DONE')) {
+            break;
+          }
+        } else {
+          cicliSenzaNuovi++;
+        }
+      }
+
+      if (cicliSenzaNuovi >= 3) {
+        break;
+      }
+
+      await Future.delayed(_readChunkPause);
+    }
+
+    final unito = chunks.join('');
+    return unito.replaceAll('END', '').replaceAll('DONE', '').trim();
   }
 
   List<Map<String, dynamic>> _parseDati(String raw) {
@@ -156,4 +252,18 @@ class GatewayService {
 
     return records;
   }
+}
+
+class GatewayDownloadResult {
+  GatewayDownloadResult({
+    required this.records,
+    required this.clearSent,
+    required this.expectedMasterCount,
+    required this.masterIdsInDump,
+  });
+
+  final List<Map<String, dynamic>> records;
+  final bool clearSent;
+  final int expectedMasterCount;
+  final Set<int> masterIdsInDump;
 }

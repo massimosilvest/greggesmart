@@ -7,6 +7,10 @@ class DatabaseService {
   DatabaseService._internal();
 
   static const String _chiaveNumeroMaster = 'numero_master';
+  static const Duration _finestraTrasmissioneUtile = Duration(minutes: 10);
+  static const int _minTrasmissioniFallbackNoFix = 3;
+  static const int _minPlausibleEpochSeconds = 1577836800; // 2020-01-01
+  static const int _maxPlausibleEpochSeconds = 4102444800; // 2100-01-01
 
   Database? _db;
 
@@ -304,6 +308,7 @@ class DatabaseService {
   Future<void> salvaDatiGateway(List<Map<String, dynamic>> records) async {
     final db = await database;
     final importedAt = DateTime.now().toIso8601String();
+    final importedAtDt = DateTime.parse(importedAt);
 
     for (final r in records) {
       final rawMasterId = r['master_id'];
@@ -311,8 +316,13 @@ class DatabaseService {
           ? (rawMasterId > 0 ? rawMasterId : null)
           : int.tryParse('$rawMasterId');
 
-      final ts = DateTime.fromMillisecondsSinceEpoch(
-        (r['timestamp'] as int) * 1000,
+      final rawTimestamp = r['timestamp'];
+      final timestampSeconds = rawTimestamp is int
+          ? rawTimestamp
+          : int.tryParse('$rawTimestamp');
+      final ts = _resolveGatewayTimestamp(
+        timestampSeconds,
+        fallback: importedAtDt,
       );
       await db.insert('storico', {
         'tag_id': r['tag_id'],
@@ -331,28 +341,112 @@ class DatabaseService {
     }
   }
 
+  DateTime _resolveGatewayTimestamp(
+    int? raw,
+    {required DateTime fallback}
+  ) {
+    if (raw == null || raw <= 0) return fallback;
+
+    DateTime ts;
+    if (raw >= 1000000000000) {
+      // Alcuni firmware possono inviare millisecondi già pronti.
+      ts = DateTime.fromMillisecondsSinceEpoch(raw);
+    } else {
+      ts = DateTime.fromMillisecondsSinceEpoch(raw * 1000);
+    }
+
+    final epochSeconds = ts.millisecondsSinceEpoch ~/ 1000;
+    if (epochSeconds < _minPlausibleEpochSeconds ||
+        epochSeconds > _maxPlausibleEpochSeconds) {
+      return fallback;
+    }
+
+    return ts;
+  }
+
   Future<Map<int, int>> getUltimoMasterPerSlave() async {
     final db = await database;
     final rows = await db.rawQuery('''
-      SELECT tag_id, master_id, rssi, imported_at, timestamp, gps_valid
+      SELECT id, tag_id, master_id, rssi, imported_at, timestamp, gps_valid
       FROM storico
       WHERE master_id IS NOT NULL AND master_id > 0
       ORDER BY
         tag_id ASC,
-        COALESCE(gps_valid, 0) DESC,
         COALESCE(imported_at, timestamp) DESC,
         timestamp DESC,
-        rssi DESC,
         id DESC
     ''');
 
     final mappa = <int, int>{};
+    final now = DateTime.now();
+    final limiteUtilita = now.subtract(_finestraTrasmissioneUtile);
+
+    final perSlave = <int, List<Map<String, dynamic>>>{};
     for (final row in rows) {
       final tagId = row['tag_id'] as int?;
-      final masterId = row['master_id'] as int?;
-      if (tagId == null || masterId == null) continue;
-      mappa.putIfAbsent(tagId, () => masterId);
+      if (tagId == null) continue;
+      perSlave.putIfAbsent(tagId, () => []).add(row);
     }
+
+    for (final entry in perSlave.entries) {
+      final tagId = entry.key;
+      final rowsSlave = entry.value;
+
+      final perMaster = <int, _MasterAssocCandidate>{};
+      for (final row in rowsSlave) {
+        final masterId = row['master_id'] as int?;
+        if (masterId == null || masterId <= 0) continue;
+
+        final candidato = perMaster.putIfAbsent(
+          masterId,
+          () => _MasterAssocCandidate(masterId: masterId),
+        );
+        candidato.addRow(row, limiteUtilita);
+      }
+
+      if (perMaster.isEmpty) continue;
+
+      final candidati = perMaster.values.toList();
+      final mastersConDatiRecenti = candidati
+          .where((c) => c.trasmissioniUtili > 0)
+          .length;
+
+      candidati.sort((a, b) {
+        final aUtile = a.trasmissioniUtili > 0;
+        final bUtile = b.trasmissioniUtili > 0;
+        if (aUtile != bUtile) {
+          return aUtile ? -1 : 1;
+        }
+
+        final aFallbackNoFix =
+            a.trasmissioniUtili >= _minTrasmissioniFallbackNoFix &&
+            mastersConDatiRecenti <= 1;
+        final bFallbackNoFix =
+            b.trasmissioniUtili >= _minTrasmissioniFallbackNoFix &&
+            mastersConDatiRecenti <= 1;
+        if (aFallbackNoFix != bFallbackNoFix) {
+          return aFallbackNoFix ? -1 : 1;
+        }
+
+        final cmpRssiUtile = b.bestRssiUtile.compareTo(a.bestRssiUtile);
+        if (cmpRssiUtile != 0) return cmpRssiUtile;
+
+        final cmpTxUtile = b.trasmissioniUtili.compareTo(a.trasmissioniUtili);
+        if (cmpTxUtile != 0) return cmpTxUtile;
+
+        if (a.hasGpsFixUtile != b.hasGpsFixUtile) {
+          return a.hasGpsFixUtile ? -1 : 1;
+        }
+
+        final cmpTempo = b.ultimoEffettivo.compareTo(a.ultimoEffettivo);
+        if (cmpTempo != 0) return cmpTempo;
+
+        return b.bestRssiStorico.compareTo(a.bestRssiStorico);
+      });
+
+      mappa[tagId] = candidati.first.masterId;
+    }
+
     return mappa;
   }
 
@@ -393,5 +487,45 @@ class DatabaseService {
       WHERE ${where.toString()}
       ORDER BY s.timestamp ASC, s.id ASC
       ''', args);
+  }
+}
+
+class _MasterAssocCandidate {
+  _MasterAssocCandidate({required this.masterId});
+
+  final int masterId;
+
+  int trasmissioniUtili = 0;
+  int bestRssiUtile = -999;
+  int bestRssiStorico = -999;
+  bool hasGpsFixUtile = false;
+  DateTime ultimoEffettivo = DateTime.fromMillisecondsSinceEpoch(0);
+
+  void addRow(Map<String, dynamic> row, DateTime limiteUtilita) {
+    final rssiRaw = row['rssi'];
+    final rssi = rssiRaw is int ? rssiRaw : int.tryParse('$rssiRaw') ?? -999;
+    if (rssi > bestRssiStorico) bestRssiStorico = rssi;
+
+    final ts = _safeParseIsoDate(row['timestamp']);
+    final importedAt = _safeParseIsoDate(row['imported_at']);
+    final effettivo = importedAt ?? ts;
+    if (effettivo != null && effettivo.isAfter(ultimoEffettivo)) {
+      ultimoEffettivo = effettivo;
+    }
+
+    final utile = effettivo != null && !effettivo.isBefore(limiteUtilita);
+    if (!utile) return;
+
+    trasmissioniUtili++;
+    if (rssi > bestRssiUtile) bestRssiUtile = rssi;
+
+    final gpsRaw = row['gps_valid'];
+    final gpsValid = gpsRaw == 1 || gpsRaw == true || gpsRaw == '1';
+    if (gpsValid) hasGpsFixUtile = true;
+  }
+
+  static DateTime? _safeParseIsoDate(Object? raw) {
+    if (raw == null) return null;
+    return DateTime.tryParse('$raw');
   }
 }

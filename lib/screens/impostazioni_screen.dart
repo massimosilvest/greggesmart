@@ -11,6 +11,7 @@ class ImpostazioniScreen extends StatefulWidget {
 class _ImpostazioniScreenState extends State<ImpostazioniScreen> {
   final _db = DatabaseService();
   int _numeroMaster = 0;
+  int _numeroMasterIniziale = 0;
   bool _loading = true;
   bool _salvato = false;
 
@@ -24,12 +25,49 @@ class _ImpostazioniScreenState extends State<ImpostazioniScreen> {
     final config = await _db.getConfigurazione('numero_master');
     setState(() {
       _numeroMaster = int.tryParse(config ?? '0') ?? 0;
+      _numeroMasterIniziale = _numeroMaster;
       _loading = false;
     });
   }
 
   Future<void> _salva() async {
+    if (_numeroMaster != _numeroMasterIniziale) {
+      final conferma = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          backgroundColor: const Color(0xFF0F2318),
+          title: const Text(
+            'Attenzione',
+            style: TextStyle(color: Color(0xFFFFB703)),
+          ),
+          content: const Text(
+            'Cambiare il numero di master può rendere incoerenti i dati già scaricati.\n\nSalva prima un backup o verifica lo storico prima di procedere.',
+            style: TextStyle(color: Colors.white70),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text(
+                'ANNULLA',
+                style: TextStyle(color: Colors.white54),
+              ),
+            ),
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text(
+                'CONTINUA',
+                style: TextStyle(color: Color(0xFF2DFF6E)),
+              ),
+            ),
+          ],
+        ),
+      );
+
+      if (conferma != true) return;
+    }
+
     await _db.salvaConfigurazione('numero_master', _numeroMaster.toString());
+    _numeroMasterIniziale = _numeroMaster;
     setState(() => _salvato = true);
     await Future.delayed(const Duration(milliseconds: 800));
     if (mounted) setState(() => _salvato = false);

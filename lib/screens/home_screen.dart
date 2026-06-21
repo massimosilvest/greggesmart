@@ -48,6 +48,7 @@ class _HomeScreenState extends State<HomeScreen> {
   int? _storicoTagFilter;
   bool _downloadInProgress = false;
   Timer? _downloadTimeout;
+  int? _ultimoAvvisoMismatchMaster;
 
   static const String _cfgPhoneLat = 'last_phone_lat';
   static const String _cfgPhoneLon = 'last_phone_lon';
@@ -78,6 +79,8 @@ class _HomeScreenState extends State<HomeScreen> {
       _aggiornaFallbackMasterDaLive(tags);
       _tryApplyInitialMapCenter();
       _aggiornaDati(tags.keys.toList());
+      _arricchisciSlaveConGpsTelefonoSeNomade(tags);
+      _valutaAvvisoNumeroMaster(tags);
     });
 
     _caricaTuttiDati();
@@ -130,6 +133,58 @@ class _HomeScreenState extends State<HomeScreen> {
         if (p != null && mounted) setState(() => _pecore[tagId] = p);
       }
     }
+  }
+
+  void _valutaAvvisoNumeroMaster(Map<int, TagDevice> tags) {
+    final masterLiveCount = tags.values.where((tag) => tag.isMaster).length;
+
+    if (masterLiveCount == _numeroMaster) {
+      _ultimoAvvisoMismatchMaster = null;
+      return;
+    }
+
+    if (_ultimoAvvisoMismatchMaster == masterLiveCount) return;
+    _ultimoAvvisoMismatchMaster = masterLiveCount;
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      showDialog<void>(
+        context: context,
+        builder: (dialogContext) => AlertDialog(
+          backgroundColor: const Color(0xFF0F2318),
+          title: const Text(
+            'Numero master non coerente',
+            style: TextStyle(color: Color(0xFFFFB703)),
+          ),
+          content: Text(
+            'Nel wizard hai impostato $_numeroMaster master, ma ora ne vedo $masterLiveCount in live.\n\nSe devi cambiare questo valore, salva prima i dati già presenti: la logica di scarico e il mapping dello storico possono diventare incoerenti.',
+            style: const TextStyle(color: Colors.white70),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext),
+              child: const Text(
+                'IGNORA',
+                style: TextStyle(color: Colors.white54),
+              ),
+            ),
+            TextButton(
+              onPressed: () {
+                Navigator.pop(dialogContext);
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(builder: (_) => const ImpostazioniScreen()),
+                );
+              },
+              child: const Text(
+                'APRi IMPOSTAZIONI',
+                style: TextStyle(color: Color(0xFF2DFF6E)),
+              ),
+            ),
+          ],
+        ),
+      );
+    });
   }
 
   Future<void> _ricaricaDati() async {
@@ -385,13 +440,37 @@ class _HomeScreenState extends State<HomeScreen> {
     return _CardAssenteMaster(master: master, onAggiornato: _ricaricaDati);
   }
 
+  Future<void> _arricchisciSlaveConGpsTelefonoSeNomade(
+    Map<int, TagDevice> tags,
+  ) async {
+    if (_numeroMaster > 0) return;
+    if (_centroFallback == null) return;
+
+    for (final tag in tags.values) {
+      if (!tag.isSlave) continue;
+
+      await _db.salvaTrasmissione(
+        tagId: tag.tagId,
+        masterId: null,
+        latitude: _centroFallback!.latitude,
+        longitude: _centroFallback!.longitude,
+        gpsValid: true,
+        bootCount: tag.bootCount,
+        batteryPct: tag.batteryPct,
+        batteryMv: tag.batteryMv,
+        temperature: tag.temperature,
+        rssi: tag.rssi,
+      );
+    }
+  }
+
   List<TagDevice> _liveTagsOrdinati() {
     final tags = _tags.values.toList();
     tags.sort((a, b) => b.lastSeen.compareTo(a.lastSeen));
     return tags;
   }
 
-  int? _selezionaMateriMiglioreDaLive() {
+  int? _selezionaMasterMiglioreDaLive() {
     final masterLive = _tags.values.where((tag) => tag.isMaster).toList();
     if (masterLive.isEmpty) return null;
 
@@ -402,7 +481,7 @@ class _HomeScreenState extends State<HomeScreen> {
   Future<void> _scaricaDaGatewayUnificato() async {
     if (_downloadInProgress) return;
 
-    final masterId = _selezionaMateriMiglioreDaLive();
+    final masterId = _selezionaMasterMiglioreDaLive();
     if (masterId == null) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -479,8 +558,9 @@ class _HomeScreenState extends State<HomeScreen> {
 
     try {
       final gateway = GatewayService();
-      final records = await gateway.scaricaDaGateway(
+      final download = await gateway.scaricaDaGateway(
         masterId: masterId,
+        expectedMasterCount: _numeroMaster > 0 ? _numeroMaster : 1,
         onStatus: (status) {
           if (!mounted) return;
           statusNotifier.value = status;
@@ -490,7 +570,7 @@ class _HomeScreenState extends State<HomeScreen> {
       if (!mounted) return;
       _downloadTimeout?.cancel();
 
-      await _db.salvaDatiGateway(records);
+      await _db.salvaDatiGateway(download.records);
       await _ricaricaDati();
       final slaveAssociati = _slaveMasterByDb.values
           .where((id) => id == masterId)
@@ -499,15 +579,20 @@ class _HomeScreenState extends State<HomeScreen> {
       closeDialogIfOpen();
 
       if (mounted) {
+        final resetInfo = download.clearSent
+            ? 'Reset memoria inviato.'
+            : 'Reset memoria NON inviato: dump da ${download.masterIdsInDump.length}/${download.expectedMasterCount} master.';
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text(
-              records.isEmpty
-                  ? 'Download completato: 0 record (nessun nuovo dato).'
-                  : 'Scaricati ${records.length} record. Slave ora associati a questo master: $slaveAssociati',
+              download.records.isEmpty
+                  ? 'Download completato: 0 record (nessun nuovo dato). $resetInfo'
+                  : 'Scaricati ${download.records.length} record. Slave ora associati a questo master: $slaveAssociati. $resetInfo',
             ),
-            backgroundColor: records.isEmpty ? Colors.orange : Colors.green,
-            duration: const Duration(seconds: 3),
+            backgroundColor: download.records.isEmpty
+                ? Colors.orange
+                : Colors.green,
+            duration: const Duration(seconds: 4),
           ),
         );
       }
@@ -537,6 +622,8 @@ class _HomeScreenState extends State<HomeScreen> {
 
   Widget _buildLiveTab() {
     final tags = _liveTagsOrdinati();
+    final masterLiveCount = tags.where((tag) => tag.isMaster).length;
+    final slaveLiveCount = tags.where((tag) => tag.isSlave).length;
 
     final children = <Widget>[
       const _SectionHeader(
@@ -548,6 +635,13 @@ class _HomeScreenState extends State<HomeScreen> {
         child: Text(
           'Qui vedi tutto quello che l\'antenna riceve ora: è la vista utile per cercare una pecora nel gregge.',
           style: TextStyle(color: Colors.white38, fontSize: 11),
+        ),
+      ),
+      Padding(
+        padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+        child: Text(
+          'Totale live: master $masterLiveCount | slave $slaveLiveCount',
+          style: const TextStyle(color: Colors.white54, fontSize: 12),
         ),
       ),
     ];
@@ -902,8 +996,10 @@ class _HomeScreenState extends State<HomeScreen> {
         if (servizioAttivo) {
           try {
             final pos = await Geolocator.getCurrentPosition(
-              desiredAccuracy: LocationAccuracy.medium,
-              timeLimit: const Duration(seconds: 6),
+              locationSettings: const LocationSettings(
+                accuracy: LocationAccuracy.medium,
+                timeLimit: Duration(seconds: 6),
+              ),
             );
             posizioneTelefono = LatLng(pos.latitude, pos.longitude);
           } catch (_) {
@@ -1031,7 +1127,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
     final mastersConGps = _mastersConGps();
     final centro = _centroMappa();
-    final zoom = mastersConGps.length > 1 ? 12.0 : 14.0;
+    final z oom = mastersConGps.length > 1 ? 12.0 : 14.0;
 
     _mapController.move(centro, zoom);
 
@@ -1081,7 +1177,7 @@ class _HomeScreenState extends State<HomeScreen> {
             onTap: () => _apriDettaglioMaster(tag),
             child: Container(
               decoration: BoxDecoration(
-                color: colore.withOpacity(0.92),
+                color: colore.withValues(alpha: 0.92),
                 shape: BoxShape.circle,
                 boxShadow: const [
                   BoxShadow(
@@ -1106,20 +1202,23 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Widget _buildMappaLive() {
+    final isNomade = _numeroMaster == 0;
     final masters = _tags.values.where((tag) => tag.isMaster).toList()
       ..sort((a, b) => b.lastSeen.compareTo(a.lastSeen));
-    final mastersConGps = _mastersConGps();
+    final List<TagDevice> mastersConGps = isNomade ? [] : _mastersConGps();
     final slavesLive = _slaveLive();
-    final centro = _centroMappa();
     final pastorePos = _centroFallback;
+    final centro = isNomade && pastorePos != null ? pastorePos : _centroMappa();
     final raggioRicerca = _raggioRicercaSlaveMetri();
 
     final children = <Widget>[
-      const Padding(
-        padding: EdgeInsets.fromLTRB(16, 0, 16, 8),
+      Padding(
+        padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
         child: Text(
-          'Mappa operativa in tempo reale: usa i dati live BLE per ricerca sul campo.',
-          style: TextStyle(color: Colors.white38, fontSize: 11),
+          isNomade
+              ? 'Mappa nomade: telefono come riferimento, ricerca slave nel raggio.'
+              : 'Mappa ibrida: master come riferimento geografico principale.',
+          style: const TextStyle(color: Colors.white38, fontSize: 11),
         ),
       ),
       Padding(
@@ -1153,7 +1252,9 @@ class _HomeScreenState extends State<HomeScreen> {
                             point: pastorePos,
                             radius: raggioRicerca,
                             useRadiusInMeter: true,
-                            color: const Color(0xFF2D9BFF).withOpacity(0.18),
+                            color: const Color(
+                              0xFF2D9BFF,
+                            ).withValues(alpha: 0.18),
                             borderColor: const Color(0xFF2D9BFF),
                             borderStrokeWidth: 2,
                           ),
@@ -1172,16 +1273,19 @@ class _HomeScreenState extends State<HomeScreen> {
                     ),
                   ],
                 ),
-                if (mastersConGps.isEmpty)
+                if ((isNomade && pastorePos == null) ||
+                    (!isNomade && mastersConGps.isEmpty))
                   Container(
-                    color: Colors.black.withOpacity(0.35),
+                    color: Colors.black.withValues(alpha: 0.35),
                     alignment: Alignment.center,
-                    child: const Padding(
-                      padding: EdgeInsets.all(16),
+                    child: Padding(
+                      padding: const EdgeInsets.all(16),
                       child: Text(
-                        'Nessun master con GPS valido al momento.',
+                        isNomade
+                            ? 'GPS telefono non disponibile al momento.'
+                            : 'Nessun master con GPS valido al momento.',
                         textAlign: TextAlign.center,
-                        style: TextStyle(
+                        style: const TextStyle(
                           color: Colors.white70,
                           fontSize: 13,
                           fontWeight: FontWeight.w600,
@@ -1197,7 +1301,9 @@ class _HomeScreenState extends State<HomeScreen> {
       Padding(
         padding: const EdgeInsets.fromLTRB(16, 10, 16, 4),
         child: Text(
-          'Pastore: ${pastorePos != null ? 'visibile' : 'no fix'}  |  Master live: ${masters.length}  |  Con GPS valido: ${mastersConGps.length}',
+          isNomade
+              ? 'Pastore (rif.GPS): ${pastorePos != null ? 'visibile' : 'no fix'}  |  Slave live: ${slavesLive.length}'
+              : 'Pastore: ${pastorePos != null ? 'visibile' : 'no fix'}  |  Master live: ${masters.length}  |  Con GPS: ${mastersConGps.length}',
           style: const TextStyle(color: Colors.white54, fontSize: 12),
         ),
       ),
@@ -1212,7 +1318,21 @@ class _HomeScreenState extends State<HomeScreen> {
       ),
     ];
 
-    if (masters.isEmpty) {
+    if (isNomade) {
+      if (pastorePos == null) {
+        children.add(
+          const Center(
+            child: Padding(
+              padding: EdgeInsets.fromLTRB(16, 28, 16, 8),
+              child: Text(
+                'Modalità nomade: attendo GPS del telefono...',
+                style: TextStyle(color: Colors.white54),
+              ),
+            ),
+          ),
+        );
+      }
+    } else if (masters.isEmpty) {
       children.add(
         const Center(
           child: Padding(
@@ -1272,7 +1392,7 @@ class _HomeScreenState extends State<HomeScreen> {
               const SizedBox(width: 8),
               Expanded(
                 child: DropdownButtonFormField<int?>(
-                  value: _storicoTagFilter,
+                  initialValue: _storicoTagFilter,
                   dropdownColor: const Color(0xFF0F2318),
                   decoration: const InputDecoration(
                     isDense: true,
@@ -1366,13 +1486,13 @@ class _HomeScreenState extends State<HomeScreen> {
                   ),
                   if (_storicoLoading)
                     Container(
-                      color: Colors.black.withOpacity(0.35),
+                      color: Colors.black.withValues(alpha: 0.35),
                       alignment: Alignment.center,
                       child: const CircularProgressIndicator(),
                     ),
                   if (!_storicoLoading && latLngPunti.isEmpty)
                     Container(
-                      color: Colors.black.withOpacity(0.35),
+                      color: Colors.black.withValues(alpha: 0.35),
                       alignment: Alignment.center,
                       child: const Padding(
                         padding: EdgeInsets.all(16),

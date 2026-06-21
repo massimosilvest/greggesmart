@@ -30,6 +30,7 @@ class _DatabaseViewerScreenState extends State<DatabaseViewerScreen> {
   int? _tagFilter;
   int? _masterFilter;
   DateTime? _dayFilter;
+  bool _includiEventiTelefono = false;
 
   @override
   void initState() {
@@ -94,6 +95,20 @@ class _DatabaseViewerScreenState extends State<DatabaseViewerScreen> {
     return '0x${id.toRadixString(16).toUpperCase().padLeft(4, '0')}';
   }
 
+  String _labelTag(int id) {
+    final nomeSlave = _nomiPecoreByTag[id];
+    if (nomeSlave != null && nomeSlave.trim().isNotEmpty) {
+      return '$nomeSlave (${_idHex(id)})';
+    }
+
+    final nomeMaster = _nomiMasterByTag[id];
+    if (nomeMaster != null && nomeMaster.trim().isNotEmpty) {
+      return '$nomeMaster (${_idHex(id)})';
+    }
+
+    return _idHex(id);
+  }
+
   String _ruoloTag(int? tagId) {
     if (tagId == null || tagId <= 0) return 'TAG';
     if (_nomiPecoreByTag.containsKey(tagId)) return 'SLAVE';
@@ -141,6 +156,27 @@ class _DatabaseViewerScreenState extends State<DatabaseViewerScreen> {
     return ids.toList()..sort();
   }
 
+  Set<int> _masterIdsStorici() {
+    final ids = <int>{};
+    for (final row in _storico) {
+      final id = _intOrNull(row['master_id']);
+      if (id != null && id > 0) ids.add(id);
+    }
+    return ids;
+  }
+
+  Set<int> _slaveIdsStorici() {
+    final masterIds = _masterIdsStorici();
+    final ids = <int>{};
+    for (final row in _storico) {
+      final tagId = _intOrNull(row['tag_id']);
+      if (tagId == null || tagId <= 0) continue;
+      if (masterIds.contains(tagId)) continue;
+      ids.add(tagId);
+    }
+    return ids;
+  }
+
   bool _sameDay(DateTime a, DateTime b) {
     return a.year == b.year && a.month == b.month && a.day == b.day;
   }
@@ -152,6 +188,10 @@ class _DatabaseViewerScreenState extends State<DatabaseViewerScreen> {
       final tagId = _intOrNull(row['tag_id']);
       final masterId = _intOrNull(row['master_id']);
       final timestamp = '${row['timestamp'] ?? ''}';
+
+      if (!_includiEventiTelefono && (masterId == null || masterId <= 0)) {
+        return false;
+      }
 
       if (_tagFilter != null && tagId != _tagFilter) return false;
       if (_masterFilter != null && masterId != _masterFilter) return false;
@@ -195,6 +235,7 @@ class _DatabaseViewerScreenState extends State<DatabaseViewerScreen> {
       _tagFilter = null;
       _masterFilter = null;
       _dayFilter = null;
+      _includiEventiTelefono = false;
     });
   }
 
@@ -367,11 +408,32 @@ class _DatabaseViewerScreenState extends State<DatabaseViewerScreen> {
               ),
             ),
             const SizedBox(height: 10),
-            Row(
+            SwitchListTile(
+              dense: true,
+              contentPadding: EdgeInsets.zero,
+              value: _includiEventiTelefono,
+              activeThumbColor: const Color(0xFF2DFF6E),
+              title: const Text(
+                'Includi eventi slave -> telefono',
+                style: TextStyle(color: Colors.white),
+              ),
+              subtitle: const Text(
+                'Se disattivo, mostra solo record con master reale',
+                style: TextStyle(color: Colors.white54, fontSize: 12),
+              ),
+              onChanged: (value) {
+                setState(() => _includiEventiTelefono = value);
+              },
+            ),
+            const SizedBox(height: 10),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
               children: [
-                Expanded(
+                SizedBox(
+                  width: 260,
                   child: DropdownButtonFormField<int?>(
-                    value: _tagFilter,
+                    initialValue: _tagFilter,
                     dropdownColor: const Color(0xFF0F2318),
                     style: const TextStyle(color: Colors.white),
                     decoration: const InputDecoration(
@@ -388,17 +450,17 @@ class _DatabaseViewerScreenState extends State<DatabaseViewerScreen> {
                       ...tagOptions.map(
                         (id) => DropdownMenuItem<int?>(
                           value: id,
-                          child: Text('Tag ${_idHex(id)}'),
+                          child: Text(_labelTag(id)),
                         ),
                       ),
                     ],
                     onChanged: (value) => setState(() => _tagFilter = value),
                   ),
                 ),
-                const SizedBox(width: 8),
-                Expanded(
+                SizedBox(
+                  width: 260,
                   child: DropdownButtonFormField<int?>(
-                    value: _masterFilter,
+                    initialValue: _masterFilter,
                     dropdownColor: const Color(0xFF0F2318),
                     style: const TextStyle(color: Colors.white),
                     decoration: const InputDecoration(
@@ -415,7 +477,7 @@ class _DatabaseViewerScreenState extends State<DatabaseViewerScreen> {
                       ...masterOptions.map(
                         (id) => DropdownMenuItem<int?>(
                           value: id,
-                          child: Text('Master ${_idHex(id)}'),
+                          child: Text(_labelTag(id)),
                         ),
                       ),
                     ],
@@ -425,9 +487,13 @@ class _DatabaseViewerScreenState extends State<DatabaseViewerScreen> {
               ],
             ),
             const SizedBox(height: 10),
-            Row(
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              crossAxisAlignment: WrapCrossAlignment.center,
               children: [
-                Expanded(
+                SizedBox(
+                  width: 260,
                   child: OutlinedButton.icon(
                     onPressed: _pickDay,
                     icon: const Icon(Icons.calendar_today, size: 16),
@@ -438,7 +504,6 @@ class _DatabaseViewerScreenState extends State<DatabaseViewerScreen> {
                     ),
                   ),
                 ),
-                const SizedBox(width: 8),
                 TextButton(
                   onPressed: _clearFilters,
                   child: const Text(
@@ -501,13 +566,13 @@ class _DatabaseViewerScreenState extends State<DatabaseViewerScreen> {
                   Row(
                     children: [
                       _buildCountTile(
-                        'Pecore',
-                        _pecore.length,
+                        'Slave totali',
+                        _slaveIdsStorici().length,
                         const Color(0xFF2DFF6E),
                       ),
                       _buildCountTile(
-                        'Master',
-                        _master.length,
+                        'Master totali',
+                        _masterIdsStorici().length,
                         const Color(0xFF2D9BFF),
                       ),
                       _buildCountTile(
@@ -572,11 +637,15 @@ class _DatabaseViewerScreenState extends State<DatabaseViewerScreen> {
                       final ruolo = _ruoloTag(tagId);
                       final nomeTag = _nomeTag(tagId);
                       final nomeMaster = _nomeTag(masterId);
+                      final hasMaster = masterId != null && masterId > 0;
+                      final targetLabel = hasMaster
+                          ? 'MASTER $masterHex ($nomeMaster)'
+                          : 'APP/TELEFONO';
                       final gpsValid = _intOrNull(row['gps_valid']) == 1;
                       return ListTile(
                         dense: true,
                         title: Text(
-                          '$ruolo $tagHex ($nomeTag)  ->  MASTER $masterHex ($nomeMaster)',
+                          '$ruolo $tagHex ($nomeTag)  ->  $targetLabel',
                           style: const TextStyle(color: Colors.white),
                         ),
                         subtitle: Text(
