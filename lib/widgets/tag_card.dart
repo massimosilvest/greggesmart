@@ -44,11 +44,11 @@ class TagCard extends StatelessWidget {
     return Row(
       mainAxisSize: MainAxisSize.min,
       children: [
-        Icon(icon, color: color, size: 18),
+        Icon(icon, color: color, size: 16),
         const SizedBox(width: 3),
         Text(
           '${tag.batteryPct}%',
-          style: TextStyle(color: color, fontSize: 13),
+          style: TextStyle(color: color, fontSize: 12),
         ),
       ],
     );
@@ -84,9 +84,9 @@ class TagCard extends StatelessWidget {
       },
       child: Card(
         color: const Color(0xFF0F1F3D),
-        margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 5),
+        margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 3),
         child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
           child: Row(
             children: [
               Column(
@@ -94,12 +94,12 @@ class TagCard extends StatelessWidget {
                   Icon(
                     tag.gatewayMode ? Icons.router : Icons.hub,
                     color: tag.gatewayMode ? Colors.amber : stato.color,
-                    size: 28,
+                    size: 24,
                   ),
                   Text(stato.emoji, style: const TextStyle(fontSize: 10)),
                 ],
               ),
-              const SizedBox(width: 12),
+              const SizedBox(width: 10),
               Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
@@ -108,7 +108,7 @@ class TagCard extends StatelessWidget {
                       nome,
                       style: TextStyle(
                         color: stato.color,
-                        fontSize: 16,
+                        fontSize: 14,
                         fontWeight: FontWeight.bold,
                       ),
                       overflow: TextOverflow.ellipsis,
@@ -116,7 +116,7 @@ class TagCard extends StatelessWidget {
                     if (!associato)
                       const Text(
                         'Tocca per associare',
-                        style: TextStyle(color: Colors.orange, fontSize: 11),
+                        style: TextStyle(color: Colors.orange, fontSize: 10),
                       ),
                     Text(
                       tag.gpsValid
@@ -125,7 +125,7 @@ class TagCard extends StatelessWidget {
                           : 'GPS: no fix',
                       style: TextStyle(
                         color: tag.gpsValid ? Colors.white54 : Colors.white30,
-                        fontSize: 11,
+                        fontSize: 10,
                       ),
                     ),
                   ],
@@ -135,12 +135,12 @@ class TagCard extends StatelessWidget {
                 crossAxisAlignment: CrossAxisAlignment.end,
                 children: [
                   _batteryIcon(tag),
-                  const SizedBox(height: 4),
+                  const SizedBox(height: 2),
                   Text(
                     distanza,
                     style: const TextStyle(
                       color: Colors.white70,
-                      fontSize: 13,
+                      fontSize: 12,
                       fontWeight: FontWeight.bold,
                     ),
                   ),
@@ -182,13 +182,13 @@ class TagCard extends StatelessWidget {
       },
       child: Card(
         color: const Color(0xFF0F2318),
-        margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 5),
+        margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 3),
         child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
           child: Row(
             children: [
-              Text(stato.emoji, style: const TextStyle(fontSize: 22)),
-              const SizedBox(width: 12),
+              Text(stato.emoji, style: const TextStyle(fontSize: 20)),
+              const SizedBox(width: 10),
               Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
@@ -197,7 +197,7 @@ class TagCard extends StatelessWidget {
                       nome,
                       style: const TextStyle(
                         color: Color(0xFF2DFF6E),
-                        fontSize: 16,
+                        fontSize: 14,
                         fontWeight: FontWeight.bold,
                       ),
                       overflow: TextOverflow.ellipsis,
@@ -205,13 +205,13 @@ class TagCard extends StatelessWidget {
                     if (!associata)
                       const Text(
                         'Tocca per associare',
-                        style: TextStyle(color: Colors.orange, fontSize: 11),
+                        style: TextStyle(color: Colors.orange, fontSize: 10),
                       ),
                   ],
                 ),
               ),
               _batteryIcon(tag),
-              const SizedBox(width: 12),
+              const SizedBox(width: 10),
               Column(
                 crossAxisAlignment: CrossAxisAlignment.end,
                 children: [
@@ -219,13 +219,13 @@ class TagCard extends StatelessWidget {
                     distanza,
                     style: const TextStyle(
                       color: Colors.white70,
-                      fontSize: 14,
+                      fontSize: 12,
                       fontWeight: FontWeight.bold,
                     ),
                   ),
                   Text(
                     '${tag.temperature}°C',
-                    style: const TextStyle(color: Colors.white38, fontSize: 11),
+                    style: const TextStyle(color: Colors.white38, fontSize: 10),
                   ),
                 ],
               ),

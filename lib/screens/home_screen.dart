@@ -49,12 +49,16 @@ class _HomeScreenState extends State<HomeScreen> {
   bool _downloadInProgress = false;
   Timer? _downloadTimeout;
   int? _ultimoAvvisoMismatchMaster;
+  DateTime? _masterDeficitSince;
+  final TextEditingController _tagSearchController = TextEditingController();
+  String _tagSearchQuery = '';
 
   static const String _cfgPhoneLat = 'last_phone_lat';
   static const String _cfgPhoneLon = 'last_phone_lon';
   static const String _cfgMasterLat = 'last_master_lat';
   static const String _cfgMasterLon = 'last_master_lon';
   static const int _liveSlaveTimeoutSeconds = 120;
+  static const Duration _masterDeficitAlertDelay = Duration(minutes: 10);
 
   @override
   void initState() {
@@ -136,15 +140,35 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   void _valutaAvvisoNumeroMaster(Map<int, TagDevice> tags) {
+    if (_numeroMaster <= 0) return;
+
     final masterLiveCount = tags.values.where((tag) => tag.isMaster).length;
 
     if (masterLiveCount == _numeroMaster) {
       _ultimoAvvisoMismatchMaster = null;
+      _masterDeficitSince = null;
       return;
+    }
+
+    final isMasterDeficit = masterLiveCount < _numeroMaster;
+    if (isMasterDeficit) {
+      final now = DateTime.now();
+      _masterDeficitSince ??= now;
+      final elapsed = now.difference(_masterDeficitSince!);
+      if (elapsed < _masterDeficitAlertDelay) return;
+    } else {
+      _masterDeficitSince = null;
     }
 
     if (_ultimoAvvisoMismatchMaster == masterLiveCount) return;
     _ultimoAvvisoMismatchMaster = masterLiveCount;
+
+    final titolo = isMasterDeficit
+        ? 'Mancano master in live'
+        : 'Rilevati troppi master in live';
+    final messaggio = isMasterDeficit
+        ? 'Nel wizard hai impostato $_numeroMaster master, ma dopo ${_masterDeficitAlertDelay.inMinutes} minuti ne vedo ancora solo $masterLiveCount in live.\n\nAttendi se stanno ancora entrando in copertura; altrimenti verifica alimentazione/portata o aggiorna il numero master nelle impostazioni.'
+        : 'Nel wizard hai impostato $_numeroMaster master, ma ora ne vedo $masterLiveCount in live.\n\nSe questo valore e` corretto, aggiorna il numero master nelle impostazioni prima del prossimo scarico dati.';
 
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
@@ -152,12 +176,9 @@ class _HomeScreenState extends State<HomeScreen> {
         context: context,
         builder: (dialogContext) => AlertDialog(
           backgroundColor: const Color(0xFF0F2318),
-          title: const Text(
-            'Numero master non coerente',
-            style: TextStyle(color: Color(0xFFFFB703)),
-          ),
+          title: Text(titolo, style: TextStyle(color: Color(0xFFFFB703))),
           content: Text(
-            'Nel wizard hai impostato $_numeroMaster master, ma ora ne vedo $masterLiveCount in live.\n\nSe devi cambiare questo valore, salva prima i dati già presenti: la logica di scarico e il mapping dello storico possono diventare incoerenti.',
+            messaggio,
             style: const TextStyle(color: Colors.white70),
           ),
           actions: [
@@ -285,6 +306,7 @@ class _HomeScreenState extends State<HomeScreen> {
     _phonePositionSub?.cancel();
     _refreshTimer?.cancel();
     _downloadTimeout?.cancel();
+    _tagSearchController.dispose();
     _scanner.dispose();
     super.dispose();
   }
@@ -470,6 +492,101 @@ class _HomeScreenState extends State<HomeScreen> {
     return tags;
   }
 
+  String _tagIdHexFromInt(int tagId) {
+    return '0x${tagId.toRadixString(16).toUpperCase().padLeft(4, '0')}';
+  }
+
+  String _nomePerTag(int tagId, {required bool isMaster}) {
+    if (isMaster) {
+      return _master[tagId]?['nome'] as String? ?? _tagIdHexFromInt(tagId);
+    }
+    return _pecore[tagId]?['nome'] as String? ?? _tagIdHexFromInt(tagId);
+  }
+
+  bool _matchesTagSearch({
+    required int tagId,
+    required bool isMaster,
+    String? nome,
+  }) {
+    final query = _tagSearchQuery.trim().toLowerCase();
+    if (query.isEmpty) return true;
+
+    final tipo = isMaster ? 'master' : 'slave';
+    final tagIdDec = '$tagId';
+    final tagIdHex = _tagIdHexFromInt(tagId).toLowerCase();
+    final nomeNorm = (nome ?? '').toLowerCase();
+
+    return tipo.contains(query) ||
+        tagIdDec.contains(query) ||
+        tagIdHex.contains(query) ||
+        nomeNorm.contains(query);
+  }
+
+  String _riepilogoDataTab() {
+    if (_dataModeIndex == 0) {
+      final liveFiltrati = _liveTagsOrdinati().where((tag) {
+        return _matchesTagSearch(
+          tagId: tag.tagId,
+          isMaster: tag.isMaster,
+          nome: _nomePerTag(tag.tagId, isMaster: tag.isMaster),
+        );
+      }).toList();
+      final m = liveFiltrati.where((tag) => tag.isMaster).length;
+      final s = liveFiltrati.where((tag) => tag.isSlave).length;
+      return 'Totale live: M $m | S $s';
+    }
+
+    if (_numeroMaster > 0) {
+      final masterFiltrati = _masterIdsDaMostrare().where((masterId) {
+        if (_matchesTagSearch(
+          tagId: masterId,
+          isMaster: true,
+          nome: _nomePerTag(masterId, isMaster: true),
+        )) {
+          return true;
+        }
+
+        final slaveIds = _slaveMasterByDb.entries
+            .where((entry) => entry.value == masterId)
+            .map((entry) => entry.key);
+
+        for (final slaveId in slaveIds) {
+          if (_matchesTagSearch(
+            tagId: slaveId,
+            isMaster: false,
+            nome: _nomePerTag(slaveId, isMaster: false),
+          )) {
+            return true;
+          }
+        }
+        return false;
+      }).length;
+
+      final slaveNonAssegnati = _slaveIdsSenzaMaster()
+          .where(
+            (slaveId) => _matchesTagSearch(
+              tagId: slaveId,
+              isMaster: false,
+              nome: _nomePerTag(slaveId, isMaster: false),
+            ),
+          )
+          .length;
+
+      return 'Storico: master $masterFiltrati | non assegnati $slaveNonAssegnati';
+    }
+
+    final slaveFiltrati = _slaveIdsSenzaMaster()
+        .where(
+          (slaveId) => _matchesTagSearch(
+            tagId: slaveId,
+            isMaster: false,
+            nome: _nomePerTag(slaveId, isMaster: false),
+          ),
+        )
+        .length;
+    return 'Storico: slave $slaveFiltrati';
+  }
+
   int? _selezionaMasterMiglioreDaLive() {
     final masterLive = _tags.values.where((tag) => tag.isMaster).toList();
     if (masterLive.isEmpty) return null;
@@ -622,44 +739,32 @@ class _HomeScreenState extends State<HomeScreen> {
 
   Widget _buildLiveTab() {
     final tags = _liveTagsOrdinati();
-    final masterLiveCount = tags.where((tag) => tag.isMaster).length;
-    final slaveLiveCount = tags.where((tag) => tag.isSlave).length;
+    final filteredTags = tags.where((tag) {
+      final nome = _nomePerTag(tag.tagId, isMaster: tag.isMaster);
+      return _matchesTagSearch(
+        tagId: tag.tagId,
+        isMaster: tag.isMaster,
+        nome: nome,
+      );
+    }).toList();
+    final children = <Widget>[];
 
-    final children = <Widget>[
-      const _SectionHeader(
-        title: 'LIVE BLE',
-        subtitle: 'Segnali in tempo reale, senza logica ad albero',
-      ),
-      const Padding(
-        padding: EdgeInsets.fromLTRB(16, 0, 16, 8),
-        child: Text(
-          'Qui vedi tutto quello che l\'antenna riceve ora: è la vista utile per cercare una pecora nel gregge.',
-          style: TextStyle(color: Colors.white38, fontSize: 11),
-        ),
-      ),
-      Padding(
-        padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
-        child: Text(
-          'Totale live: master $masterLiveCount | slave $slaveLiveCount',
-          style: const TextStyle(color: Colors.white54, fontSize: 12),
-        ),
-      ),
-    ];
-
-    if (tags.isEmpty) {
+    if (filteredTags.isEmpty) {
       children.add(
-        const Center(
+        Center(
           child: Padding(
-            padding: EdgeInsets.only(top: 48),
+            padding: const EdgeInsets.only(top: 48),
             child: Text(
-              'Nessun TAG in live...',
-              style: TextStyle(color: Colors.white54),
+              _tagSearchQuery.trim().isEmpty
+                  ? 'Nessun TAG in live...'
+                  : 'Nessun TAG trovato con questo filtro.',
+              style: const TextStyle(color: Colors.white54),
             ),
           ),
         ),
       );
     } else {
-      for (final tag in tags) {
+      for (final tag in filteredTags) {
         children.add(
           TagCard(
             tag: tag,
@@ -681,21 +786,45 @@ class _HomeScreenState extends State<HomeScreen> {
     final modalitaIbrida = _numeroMaster > 0;
 
     if (modalitaIbrida) {
-      final masterIds = _masterIdsDaMostrare();
-      if (masterIds.isNotEmpty) {
-        children.add(
-          const _SectionHeader(
-            title: 'ALBERO DATABASE',
-            subtitle: 'Relazione ricostruita dopo il download dal master',
-          ),
+      final masterIdsFiltrati = _masterIdsDaMostrare().where((masterId) {
+        final masterMatch = _matchesTagSearch(
+          tagId: masterId,
+          isMaster: true,
+          nome: _nomePerTag(masterId, isMaster: true),
         );
-        for (final masterId in masterIds) {
+        if (masterMatch) return true;
+
+        final slaveIds = _slaveMasterByDb.entries
+            .where((entry) => entry.value == masterId)
+            .map((entry) => entry.key);
+
+        for (final slaveId in slaveIds) {
+          if (_matchesTagSearch(
+            tagId: slaveId,
+            isMaster: false,
+            nome: _nomePerTag(slaveId, isMaster: false),
+          )) {
+            return true;
+          }
+        }
+        return false;
+      }).toList();
+
+      if (masterIdsFiltrati.isNotEmpty) {
+        for (final masterId in masterIdsFiltrati) {
           children.add(_buildMasterTile(masterId));
 
           final slaveIds =
               _slaveMasterByDb.entries
                   .where((entry) => entry.value == masterId)
                   .map((entry) => entry.key)
+                  .where(
+                    (slaveId) => _matchesTagSearch(
+                      tagId: slaveId,
+                      isMaster: false,
+                      nome: _nomePerTag(slaveId, isMaster: false),
+                    ),
+                  )
                   .toList()
                 ..sort();
 
@@ -718,27 +847,32 @@ class _HomeScreenState extends State<HomeScreen> {
         }
       }
 
-      final slavesSenzaMaster = _slaveIdsSenzaMaster();
+      final slavesSenzaMaster = _slaveIdsSenzaMaster()
+          .where(
+            (slaveId) => _matchesTagSearch(
+              tagId: slaveId,
+              isMaster: false,
+              nome: _nomePerTag(slaveId, isMaster: false),
+            ),
+          )
+          .toList();
       if (slavesSenzaMaster.isNotEmpty) {
-        children.add(
-          const _SectionHeader(
-            title: 'TELEFONO / NON ASSEGNATI',
-            subtitle: 'Slave presenti nel database ma non agganciati',
-          ),
-        );
+        children.add(const SizedBox(height: 4));
         for (final slaveId in slavesSenzaMaster) {
           children.add(_buildSlaveTile(slaveId, nested: false));
         }
       }
     } else {
-      final slaves = _slaveIdsSenzaMaster();
+      final slaves = _slaveIdsSenzaMaster()
+          .where(
+            (slaveId) => _matchesTagSearch(
+              tagId: slaveId,
+              isMaster: false,
+              nome: _nomePerTag(slaveId, isMaster: false),
+            ),
+          )
+          .toList();
       if (slaves.isNotEmpty) {
-        children.add(
-          const _SectionHeader(
-            title: 'GATEWAY / TELEFONO',
-            subtitle: 'Modalità senza master: il telefono è il root operativo',
-          ),
-        );
         for (final slaveId in slaves) {
           children.add(_buildSlaveTile(slaveId, nested: false));
         }
@@ -1127,7 +1261,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
     final mastersConGps = _mastersConGps();
     final centro = _centroMappa();
-    final z oom = mastersConGps.length > 1 ? 12.0 : 14.0;
+    final zoom = mastersConGps.length > 1 ? 12.0 : 14.0;
 
     _mapController.move(centro, zoom);
 
@@ -1212,15 +1346,6 @@ class _HomeScreenState extends State<HomeScreen> {
     final raggioRicerca = _raggioRicercaSlaveMetri();
 
     final children = <Widget>[
-      Padding(
-        padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
-        child: Text(
-          isNomade
-              ? 'Mappa nomade: telefono come riferimento, ricerca slave nel raggio.'
-              : 'Mappa ibrida: master come riferimento geografico principale.',
-          style: const TextStyle(color: Colors.white38, fontSize: 11),
-        ),
-      ),
       Padding(
         padding: const EdgeInsets.symmetric(horizontal: 12),
         child: ClipRRect(
@@ -1522,10 +1647,6 @@ class _HomeScreenState extends State<HomeScreen> {
   Widget _buildMapTab() {
     return ListView(
       children: [
-        const _SectionHeader(
-          title: 'MAPPA GPS',
-          subtitle: 'Live operativo e storico tracciato separati',
-        ),
         Padding(
           padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
           child: SegmentedButton<int>(
@@ -1560,23 +1681,84 @@ class _HomeScreenState extends State<HomeScreen> {
       children: [
         Padding(
           padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
-          child: SegmentedButton<int>(
-            segments: const [
-              ButtonSegment<int>(
-                value: 0,
-                label: Text('Live'),
-                icon: Icon(Icons.radar),
+          child: Row(
+            children: [
+              Expanded(
+                child: SegmentedButton<int>(
+                  segments: const [
+                    ButtonSegment<int>(
+                      value: 0,
+                      label: Text('Live'),
+                      icon: Icon(Icons.radar),
+                    ),
+                    ButtonSegment<int>(
+                      value: 1,
+                      label: Text('Storico'),
+                      icon: Icon(Icons.account_tree),
+                    ),
+                  ],
+                  selected: {_dataModeIndex},
+                  onSelectionChanged: (selection) {
+                    setState(() => _dataModeIndex = selection.first);
+                  },
+                ),
               ),
-              ButtonSegment<int>(
-                value: 1,
-                label: Text('Albero'),
-                icon: Icon(Icons.account_tree),
+              const SizedBox(width: 8),
+              Expanded(
+                child: TextField(
+                  controller: _tagSearchController,
+                  onChanged: (value) {
+                    setState(() => _tagSearchQuery = value);
+                  },
+                  style: const TextStyle(color: Colors.white, fontSize: 13),
+                  decoration: InputDecoration(
+                    isDense: true,
+                    hintText: 'Cerca tag/nome/ID',
+                    hintStyle: const TextStyle(color: Colors.white38),
+                    prefixIcon: const Icon(
+                      Icons.search,
+                      size: 18,
+                      color: Colors.white54,
+                    ),
+                    suffixIcon: _tagSearchQuery.trim().isEmpty
+                        ? null
+                        : IconButton(
+                            onPressed: () {
+                              _tagSearchController.clear();
+                              setState(() => _tagSearchQuery = '');
+                            },
+                            icon: const Icon(
+                              Icons.close,
+                              size: 18,
+                              color: Colors.white54,
+                            ),
+                          ),
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    enabledBorder: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(10),
+                      borderSide: const BorderSide(color: Colors.white24),
+                    ),
+                    focusedBorder: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(10),
+                      borderSide: const BorderSide(color: Color(0xFF2DFF6E)),
+                    ),
+                    contentPadding: const EdgeInsets.symmetric(
+                      horizontal: 10,
+                      vertical: 10,
+                    ),
+                  ),
+                ),
               ),
             ],
-            selected: {_dataModeIndex},
-            onSelectionChanged: (selection) {
-              setState(() => _dataModeIndex = selection.first);
-            },
+          ),
+        ),
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 0, 16, 6),
+          child: Text(
+            '${_riepilogoDataTab()}${_tagSearchQuery.trim().isNotEmpty ? ' | filtro attivo' : ''}',
+            style: const TextStyle(color: Colors.white54, fontSize: 12),
           ),
         ),
         Expanded(
@@ -1620,7 +1802,7 @@ class _HomeScreenState extends State<HomeScreen> {
   @override
   Widget build(BuildContext context) {
     final currentTitle = _selectedTabIndex == 0
-        ? (_dataModeIndex == 0 ? 'Live BLE' : 'Albero')
+        ? (_dataModeIndex == 0 ? 'Live BLE' : 'Storico')
         : 'Mappa';
 
     return Scaffold(
@@ -1777,19 +1959,19 @@ class _CardAssenteSlave extends StatelessWidget {
       onTap: () => _apriModifica(context),
       child: Card(
         color: const Color(0xFF0F2318),
-        margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 5),
+        margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 3),
         child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
           child: Row(
             children: [
-              const Text('⬛', style: TextStyle(fontSize: 22)),
-              const SizedBox(width: 12),
+              const Text('⬛', style: TextStyle(fontSize: 18)),
+              const SizedBox(width: 10),
               Expanded(
                 child: Text(
                   pecora['nome'] as String,
                   style: const TextStyle(
                     color: Colors.white54,
-                    fontSize: 16,
+                    fontSize: 14,
                     fontWeight: FontWeight.bold,
                   ),
                   overflow: TextOverflow.ellipsis,
@@ -1797,7 +1979,7 @@ class _CardAssenteSlave extends StatelessWidget {
               ),
               const Text(
                 'Non vista',
-                style: TextStyle(color: Colors.white38, fontSize: 12),
+                style: TextStyle(color: Colors.white38, fontSize: 11),
               ),
             ],
           ),
@@ -1851,24 +2033,24 @@ class _CardAssenteMaster extends StatelessWidget {
       },
       child: Card(
         color: const Color(0xFF0F1F3D),
-        margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 5),
+        margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 3),
         child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
           child: Row(
             children: [
               Column(
                 children: [
-                  Icon(Icons.hub, color: stato.color, size: 28),
+                  Icon(Icons.hub, color: stato.color, size: 24),
                   Text(stato.emoji, style: const TextStyle(fontSize: 10)),
                 ],
               ),
-              const SizedBox(width: 12),
+              const SizedBox(width: 10),
               Expanded(
                 child: Text(
                   nome,
                   style: TextStyle(
                     color: stato.color,
-                    fontSize: 16,
+                    fontSize: 14,
                     fontWeight: FontWeight.bold,
                   ),
                   overflow: TextOverflow.ellipsis,
@@ -1876,7 +2058,7 @@ class _CardAssenteMaster extends StatelessWidget {
               ),
               Text(
                 stato.label,
-                style: TextStyle(color: stato.color, fontSize: 12),
+                style: TextStyle(color: stato.color, fontSize: 11),
               ),
             ],
           ),

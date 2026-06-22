@@ -25,6 +25,7 @@ class _DatabaseViewerScreenState extends State<DatabaseViewerScreen> {
   List<Map<String, Object?>> _storico = [];
   Map<int, String> _nomiPecoreByTag = {};
   Map<int, String> _nomiMasterByTag = {};
+  Map<String, int> _importBatchCountByTs = {};
 
   String _searchText = '';
   int? _tagFilter;
@@ -58,12 +59,20 @@ class _DatabaseViewerScreenState extends State<DatabaseViewerScreen> {
       LIMIT 250
     ''');
 
+    final batchCountByTs = <String, int>{};
+    for (final row in storico) {
+      final importedAt = '${row['imported_at'] ?? ''}'.trim();
+      if (importedAt.isEmpty) continue;
+      batchCountByTs[importedAt] = (batchCountByTs[importedAt] ?? 0) + 1;
+    }
+
     if (!mounted) return;
     setState(() {
       _pecore = pecore;
       _master = master;
       _config = config;
       _storico = storico;
+      _importBatchCountByTs = batchCountByTs;
       _nomiPecoreByTag = {
         for (final row in pecore)
           if (_intOrNull(row['tag_id']) != null)
@@ -136,6 +145,61 @@ class _DatabaseViewerScreenState extends State<DatabaseViewerScreen> {
     final min = local.minute.toString().padLeft(2, '0');
     final ss = local.second.toString().padLeft(2, '0');
     return '$dd/$mm/$yyyy $hh:$min:$ss';
+  }
+
+  DateTime? _parseDateTime(Object? raw) {
+    final text = '${raw ?? ''}'.trim();
+    if (text.isEmpty) return null;
+    return DateTime.tryParse(text)?.toLocal();
+  }
+
+  String _formatDelta(Duration delta) {
+    final total = delta.inSeconds.abs();
+    final hh = (total ~/ 3600).toString().padLeft(2, '0');
+    final mm = ((total % 3600) ~/ 60).toString().padLeft(2, '0');
+    final ss = (total % 60).toString().padLeft(2, '0');
+    return '$hh:$mm:$ss';
+  }
+
+  String _gpsLabel(Map<String, Object?> row) {
+    final gpsValid = _intOrNull(row['gps_valid']) == 1;
+    final latRaw = row['latitude'];
+    final lonRaw = row['longitude'];
+    final lat = latRaw is num ? latRaw.toDouble() : double.tryParse('$latRaw');
+    final lon = lonRaw is num ? lonRaw.toDouble() : double.tryParse('$lonRaw');
+
+    if (gpsValid && lat != null && lon != null) {
+      return 'FIX ${lat.toStringAsFixed(5)}, ${lon.toStringAsFixed(5)}';
+    }
+    if (gpsValid) return 'FIX (coord non disponibili)';
+    if (lat != null && lon != null) {
+      return 'NO FIX (ultima: ${lat.toStringAsFixed(5)}, ${lon.toStringAsFixed(5)})';
+    }
+    return 'NO FIX';
+  }
+
+  ({String label, bool isGateway}) _origineEvento(Map<String, Object?> row) {
+    final importedRaw = '${row['imported_at'] ?? ''}'.trim();
+    if (importedRaw.isEmpty) {
+      return (label: 'LIVE', isGateway: false);
+    }
+
+    final batchCount = _importBatchCountByTs[importedRaw] ?? 0;
+    final ts = _parseDateTime(row['timestamp']);
+    final imp = _parseDateTime(row['imported_at']);
+    final delta = (ts != null && imp != null) ? imp.difference(ts) : null;
+    final deltaSec = delta?.inSeconds.abs() ?? 0;
+
+    if (batchCount > 1) {
+      return (label: 'GATEWAY x$batchCount', isGateway: true);
+    }
+    if (deltaSec >= 3) {
+      return (
+        label: 'GATEWAY (delta ${_formatDelta(delta!)})',
+        isGateway: true,
+      );
+    }
+    return (label: 'SCARICO', isGateway: true);
   }
 
   List<int> _tagOptions() {
@@ -591,6 +655,14 @@ class _DatabaseViewerScreenState extends State<DatabaseViewerScreen> {
                       final nome = (row['nome'] as String?) ?? '-';
                       return ListTile(
                         dense: true,
+                        visualDensity: const VisualDensity(
+                          horizontal: 0,
+                          vertical: -3,
+                        ),
+                        contentPadding: const EdgeInsets.symmetric(
+                          horizontal: 12,
+                          vertical: 0,
+                        ),
                         title: Text(
                           nome,
                           style: const TextStyle(color: Colors.white),
@@ -612,6 +684,14 @@ class _DatabaseViewerScreenState extends State<DatabaseViewerScreen> {
                       final nome = (row['nome'] as String?) ?? '-';
                       return ListTile(
                         dense: true,
+                        visualDensity: const VisualDensity(
+                          horizontal: 0,
+                          vertical: -3,
+                        ),
+                        contentPadding: const EdgeInsets.symmetric(
+                          horizontal: 12,
+                          vertical: 0,
+                        ),
                         title: Text(
                           nome,
                           style: const TextStyle(color: Colors.white),
@@ -641,27 +721,99 @@ class _DatabaseViewerScreenState extends State<DatabaseViewerScreen> {
                       final targetLabel = hasMaster
                           ? 'MASTER $masterHex ($nomeMaster)'
                           : 'APP/TELEFONO';
-                      final gpsValid = _intOrNull(row['gps_valid']) == 1;
-                      return ListTile(
-                        dense: true,
-                        title: Text(
-                          '$ruolo $tagHex ($nomeTag)  ->  $targetLabel',
-                          style: const TextStyle(color: Colors.white),
+                      final gpsText = _gpsLabel(row);
+                      final ts = _parseDateTime(row['timestamp']);
+                      final imp = _parseDateTime(row['imported_at']);
+                      final tsFmt = _formatDataOraEu(row['timestamp']);
+                      final impFmt = _formatDataOraEu(row['imported_at']);
+                      final sameTime =
+                          ts != null &&
+                          imp != null &&
+                          ts.difference(imp).inSeconds.abs() < 2;
+                      final origine = _origineEvento(row);
+
+                      return Container(
+                        margin: const EdgeInsets.symmetric(
+                          horizontal: 10,
+                          vertical: 2,
                         ),
-                        subtitle: Text(
-                          'RSSI ${row['rssi']}  |  Bat ${row['battery_pct']}%  |  GPS ${gpsValid ? 'OK' : 'NO'}  |  ${_formatDataOraEu(row['timestamp'])}',
-                          style: const TextStyle(
-                            color: Colors.white54,
-                            fontSize: 12,
-                          ),
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 10,
+                          vertical: 7,
                         ),
-                        trailing: Text(
-                          _formatDataOraEu(row['imported_at']),
-                          style: const TextStyle(
-                            color: Colors.white30,
-                            fontSize: 10,
-                          ),
-                          textAlign: TextAlign.right,
+                        decoration: BoxDecoration(
+                          color: const Color(0xFF0B1830),
+                          borderRadius: BorderRadius.circular(10),
+                          border: Border.all(color: Colors.white10),
+                        ),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              '$ruolo $tagHex ($nomeTag)  ->  $targetLabel',
+                              style: const TextStyle(
+                                color: Colors.white,
+                                fontSize: 12,
+                                fontWeight: FontWeight.w600,
+                              ),
+                              maxLines: 2,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                            const SizedBox(height: 3),
+                            Align(
+                              alignment: Alignment.centerRight,
+                              child: Container(
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 6,
+                                  vertical: 2,
+                                ),
+                                decoration: BoxDecoration(
+                                  color: origine.isGateway
+                                      ? const Color(0xFF2D9BFF)
+                                      : const Color(0xFF2DFF6E),
+                                  borderRadius: BorderRadius.circular(999),
+                                ),
+                                child: Text(
+                                  origine.label,
+                                  style: const TextStyle(
+                                    color: Color(0xFF0A1A0F),
+                                    fontSize: 10,
+                                    fontWeight: FontWeight.bold,
+                                  ),
+                                ),
+                              ),
+                            ),
+                            const SizedBox(height: 3),
+                            Text(
+                              'RSSI ${row['rssi']}  |  Bat ${row['battery_pct']}%  |  Temp ${row['temperature']}°C',
+                              style: const TextStyle(
+                                color: Colors.white60,
+                                fontSize: 11,
+                              ),
+                            ),
+                            const SizedBox(height: 2),
+                            Text(
+                              'GPS: $gpsText',
+                              style: TextStyle(
+                                color: gpsText.startsWith('FIX')
+                                    ? const Color(0xFF2DFF6E)
+                                    : Colors.orange.shade200,
+                                fontSize: 11,
+                              ),
+                            ),
+                            const SizedBox(height: 2),
+                            Text(
+                              imp == null
+                                  ? 'Evento/Fix: $tsFmt  |  Scarico: -'
+                                  : sameTime
+                                  ? 'Scarico: $impFmt'
+                                  : 'Evento/Fix: $tsFmt  |  Scarico: $impFmt',
+                              style: const TextStyle(
+                                color: Colors.white38,
+                                fontSize: 10,
+                              ),
+                            ),
+                          ],
                         ),
                       );
                     },
@@ -671,6 +823,14 @@ class _DatabaseViewerScreenState extends State<DatabaseViewerScreen> {
                     rows: _config,
                     tileBuilder: (row) => ListTile(
                       dense: true,
+                      visualDensity: const VisualDensity(
+                        horizontal: 0,
+                        vertical: -3,
+                      ),
+                      contentPadding: const EdgeInsets.symmetric(
+                        horizontal: 12,
+                        vertical: 0,
+                      ),
                       title: Text(
                         '${row['chiave']}',
                         style: const TextStyle(color: Colors.white),
