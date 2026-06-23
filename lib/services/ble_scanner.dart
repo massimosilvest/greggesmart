@@ -11,6 +11,11 @@ class BleScanner {
   final Map<int, TagDevice> _tags = {};
   StreamSubscription? _scanSubscription;
   bool _shouldScan = false;
+  bool _persistLiveSlaveEvents = true;
+
+  void setPersistLiveSlaveEvents(bool enabled) {
+    _persistLiveSlaveEvents = enabled;
+  }
 
   void startScan() {
     _shouldScan = true;
@@ -51,7 +56,10 @@ class BleScanner {
 
     final existing = _tags[newTag.tagId];
     if (existing != null) {
-      if (newTag.bootCount != existing.bootCount) {
+      if (
+          _persistLiveSlaveEvents &&
+          newTag.isSlave &&
+          newTag.bootCount != existing.bootCount) {
         DatabaseService().salvaTrasmissione(
           tagId: newTag.tagId,
           bootCount: newTag.bootCount,
@@ -74,7 +82,7 @@ class BleScanner {
         gatewayMode: newTag.gatewayMode,
       );
     } else {
-      if (newTag.isSlave) {
+      if (_persistLiveSlaveEvents && newTag.isSlave) {
         DatabaseService().salvaTrasmissione(
           tagId: newTag.tagId,
           bootCount: newTag.bootCount,

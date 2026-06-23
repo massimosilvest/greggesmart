@@ -199,6 +199,7 @@ class DatabaseService {
     final recenti = await db.query(
       'storico',
       columns: [
+        'id',
         'timestamp',
         'boot_count',
         'battery_pct',
@@ -236,8 +237,33 @@ class DatabaseService {
         if (sameCore && delta <= _storicoDedupWindow) {
           final bothNoGps = !lastGpsValid && !gpsValid;
           final bothGps = lastGpsValid && gpsValid;
+          final enrichWithGps = !lastGpsValid && gpsValid;
+          final dropNoGpsAfterGps = lastGpsValid && !gpsValid;
 
           if (bothNoGps) return;
+
+          if (dropNoGpsAfterGps) return;
+
+          if (enrichWithGps) {
+            final lastId = last['id'] as int?;
+            if (lastId != null) {
+              await db.update(
+                'storico',
+                {
+                  'latitude': latitude,
+                  'longitude': longitude,
+                  'gps_valid': 1,
+                  'rssi': rssi,
+                  'battery_pct': batteryPct,
+                  'battery_mv': batteryMv,
+                  'temperature': temperature,
+                },
+                where: 'id = ?',
+                whereArgs: [lastId],
+              );
+              return;
+            }
+          }
 
           if (bothGps) {
             final lastLat = (last['latitude'] as num?)?.toDouble();
@@ -408,7 +434,9 @@ class DatabaseService {
     // Deduplica in memoria: mappa key = "tag|master|timestamp" -> best record
     final dupMap = <String, Map<String, dynamic>>{};
 
-    for (final r in records) {
+    for (final entry in records.asMap().entries) {
+      final rowIndex = entry.key;
+      final r = entry.value;
       final rawTagId = r['tag_id'];
       final tagId = rawTagId is int ? rawTagId : int.tryParse('$rawTagId') ?? 0;
       if (tagId <= 0) continue;
@@ -442,10 +470,10 @@ class DatabaseService {
       final timestampSeconds = rawTimestamp is int
           ? rawTimestamp
           : int.tryParse('$rawTimestamp');
-      final ts = _resolveGatewayTimestamp(
-        timestampSeconds,
-        fallback: importedAtDt,
-      );
+      final hasValidTimestamp = _isValidGatewayTimestamp(timestampSeconds);
+        final ts = hasValidTimestamp
+          ? _resolveGatewayTimestamp(timestampSeconds, fallback: importedAtDt)
+          : importedAtDt.add(Duration(seconds: rowIndex));
 
       final timestampIso = ts.toIso8601String();
       final masterIdKey = (masterId != null && masterId > 0) ? masterId : 0;
@@ -563,6 +591,17 @@ class DatabaseService {
     }
 
     return ts;
+  }
+
+  bool _isValidGatewayTimestamp(int? raw) {
+    if (raw == null || raw <= 0) return false;
+
+    final ts = raw >= 1000000000000
+        ? DateTime.fromMillisecondsSinceEpoch(raw)
+        : DateTime.fromMillisecondsSinceEpoch(raw * 1000);
+    final epochSeconds = ts.millisecondsSinceEpoch ~/ 1000;
+    return epochSeconds >= _minPlausibleEpochSeconds &&
+        epochSeconds <= _maxPlausibleEpochSeconds;
   }
 
   Future<Map<int, int>> getUltimoMasterPerSlave() async {

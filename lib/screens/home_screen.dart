@@ -51,6 +51,7 @@ class _HomeScreenState extends State<HomeScreen> {
   List<Map<String, dynamic>> _storicoPunti = [];
   int? _storicoTagFilter;
   bool _downloadInProgress = false;
+  bool _numeroMasterConfigLoaded = false;
   Timer? _downloadTimeout;
   int? _ultimoAvvisoMismatchMaster;
   DateTime? _masterDeficitSince;
@@ -64,6 +65,12 @@ class _HomeScreenState extends State<HomeScreen> {
   static const String _cfgMasterLon = 'last_master_lon';
   static const int _liveSlaveTimeoutSeconds = 120;
   static const Duration _masterDeficitAlertDelay = Duration(minutes: 10);
+
+  void _applicaModalitaPersistenzaBle(int numeroMaster) {
+    // wizard=0 (nomade): conserva live slave nel DB.
+    // wizard>=1 (ibrida): niente persistenza BLE live, solo pacchetti gateway.
+    _scanner.setPersistLiveSlaveEvents(numeroMaster <= 0);
+  }
 
   @override
   void initState() {
@@ -88,7 +95,9 @@ class _HomeScreenState extends State<HomeScreen> {
       _aggiornaFallbackMasterDaLive(tags);
       _tryApplyInitialMapCenter();
       _aggiornaDati(tags.keys.toList());
-      _arricchisciSlaveConGpsTelefonoSeNomade(tags);
+      if (_numeroMasterConfigLoaded) {
+        _arricchisciSlaveConGpsTelefonoSeNomade(tags);
+      }
       _valutaAvvisoNumeroMaster(tags);
     });
 
@@ -109,6 +118,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
   Future<void> _caricaTuttiDati() async {
     final numeroMaster = await _db.getNumeroMaster();
+    _applicaModalitaPersistenzaBle(numeroMaster);
 
     final pecore = await _db.getPecore();
     final mapPecore = <int, Map<String, dynamic>>{};
@@ -127,6 +137,7 @@ class _HomeScreenState extends State<HomeScreen> {
     if (!mounted) return;
     setState(() {
       _numeroMaster = numeroMaster;
+      _numeroMasterConfigLoaded = true;
       _pecore = mapPecore;
       _master = mapMaster;
       _slaveMasterByDb = slaveMasterByDb;
@@ -239,6 +250,9 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> _requestAndScan() async {
+    final numeroMaster = await _db.getNumeroMaster();
+    _applicaModalitaPersistenzaBle(numeroMaster);
+
     await [
       Permission.bluetooth,
       Permission.bluetoothScan,
@@ -489,6 +503,7 @@ class _HomeScreenState extends State<HomeScreen> {
   Future<void> _arricchisciSlaveConGpsTelefonoSeNomade(
     Map<int, TagDevice> tags,
   ) async {
+    if (!_numeroMasterConfigLoaded) return;
     if (_numeroMaster > 0) return;
     if (_centroFallback == null) return;
 
@@ -624,6 +639,20 @@ class _HomeScreenState extends State<HomeScreen> {
 
   Future<void> _scaricaDaGatewayUnificato() async {
     if (_downloadInProgress) return;
+
+    if (_numeroMaster <= 0) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              'Scarico gateway disabilitato in modalita` nomade (master=0).',
+            ),
+            duration: Duration(seconds: 3),
+          ),
+        );
+      }
+      return;
+    }
 
     final masterId = _selezionaMasterMiglioreDaLive();
     if (masterId == null) {
@@ -775,8 +804,124 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
+  Future<void> _sincronizzaSuServerDiretto() async {
+    if (_downloadInProgress) return;
+
+    if (_numeroMaster > 0) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Usa lo scarico gateway in modalita` master.'),
+            duration: Duration(seconds: 2),
+          ),
+        );
+      }
+      return;
+    }
+
+    if (!mounted) return;
+    final statusNotifier = ValueNotifier<String>('Avvio sync su server...');
+    var dialogAperto = false;
+
+    void closeDialogIfOpen() {
+      if (!dialogAperto || !mounted) return;
+      final navigator = Navigator.of(context, rootNavigator: true);
+      if (navigator.canPop()) {
+        navigator.pop();
+      }
+      dialogAperto = false;
+    }
+
+    setState(() {
+      _downloadInProgress = true;
+    });
+
+    dialogAperto = true;
+    showDialog(
+      context: context,
+      useRootNavigator: true,
+      barrierDismissible: false,
+      builder: (dialogContext) => AlertDialog(
+        backgroundColor: const Color(0xFF0F2318),
+        title: const Text(
+          'Sync su server',
+          style: TextStyle(color: Color(0xFF2DFF6E)),
+        ),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const CircularProgressIndicator(color: Color(0xFF2D9BFF)),
+            const SizedBox(height: 16),
+            ValueListenableBuilder<String>(
+              valueListenable: statusNotifier,
+              builder: (context, value, _) => Text(
+                value,
+                textAlign: TextAlign.center,
+                style: const TextStyle(color: Colors.white70, fontSize: 13),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+
+    try {
+      statusNotifier.value = 'Verifico copertura dati...';
+      final cloud = await _supabaseService.syncAfterGatewayWithFallback();
+
+      if (!mounted) return;
+
+      String cloudInfo;
+      if (cloud.status == CloudSyncStatus.synced) {
+        cloudInfo = 'Cloud: sync completata.';
+      } else if (cloud.status == CloudSyncStatus.queuedOffline) {
+        cloudInfo =
+            'Cloud: niente copertura dati, sync in coda (${cloud.pendingCount}).';
+      } else {
+        cloudInfo = 'Cloud: non configurato.';
+      }
+
+      closeDialogIfOpen();
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(cloudInfo),
+            backgroundColor: cloud.status == CloudSyncStatus.synced
+                ? Colors.green
+                : Colors.orange,
+            duration: const Duration(seconds: 4),
+          ),
+        );
+      }
+    } catch (e) {
+      debugPrint('Errore sync server: $e');
+      if (mounted) {
+        closeDialogIfOpen();
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Errore sync: $e'),
+            backgroundColor: Colors.red,
+            duration: const Duration(seconds: 3),
+          ),
+        );
+      }
+    } finally {
+      if (mounted) {
+        closeDialogIfOpen();
+        setState(() => _downloadInProgress = false);
+      }
+      statusNotifier.dispose();
+    }
+  }
+
   Widget _buildLiveTab() {
-    final tags = _liveTagsOrdinati();
+    final tags = _liveTagsOrdinati().where((tag) {
+      if (_numeroMaster <= 0) {
+        return tag.isSlave;
+      }
+      return true;
+    }).toList();
     final filteredTags = tags.where((tag) {
       final nome = _nomePerTag(tag.tagId, isMaster: tag.isMaster);
       return _matchesTagSearch(
@@ -1847,6 +1992,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final isNomade = _numeroMaster <= 0;
     final currentTitle = _selectedTabIndex == 0
         ? (_dataModeIndex == 0 ? 'Live BLE' : 'Storico')
         : 'Mappa';
@@ -1909,7 +2055,11 @@ class _HomeScreenState extends State<HomeScreen> {
         onTap: (index) {
           if (index == 1) {
             if (!_downloadInProgress) {
-              _scaricaDaGatewayUnificato();
+              if (isNomade) {
+                _sincronizzaSuServerDiretto();
+              } else {
+                _scaricaDaGatewayUnificato();
+              }
             }
           } else {
             setState(() => _selectedTabIndex = index < 2 ? 0 : 1);
@@ -1935,8 +2085,8 @@ class _HomeScreenState extends State<HomeScreen> {
                       ),
                     ),
                   )
-                : const Icon(Icons.cloud_download),
-            label: 'Aggiorna',
+                : Icon(isNomade ? Icons.cloud_upload : Icons.cloud_download),
+            label: isNomade ? 'Server' : 'Aggiorna',
           ),
           const BottomNavigationBarItem(icon: Icon(Icons.map), label: 'Mappa'),
         ],
