@@ -11,6 +11,7 @@ class DatabaseService {
   static const int _minTrasmissioniFallbackNoFix = 3;
   static const int _minPlausibleEpochSeconds = 1577836800; // 2020-01-01
   static const int _maxPlausibleEpochSeconds = 4102444800; // 2100-01-01
+  static const Duration _storicoDedupWindow = Duration(seconds: 45);
 
   Database? _db;
 
@@ -193,10 +194,70 @@ class DatabaseService {
     required int rssi,
   }) async {
     final db = await database;
+    final nowIso = DateTime.now().toIso8601String();
+
+    final recenti = await db.query(
+      'storico',
+      columns: [
+        'timestamp',
+        'boot_count',
+        'battery_pct',
+        'temperature',
+        'rssi',
+        'gps_valid',
+        'latitude',
+        'longitude',
+      ],
+      where: 'tag_id = ? AND COALESCE(master_id, 0) = ?',
+      whereArgs: [tagId, masterId ?? 0],
+      orderBy: 'id DESC',
+      limit: 1,
+    );
+
+    if (recenti.isNotEmpty) {
+      final last = recenti.first;
+      final lastTsRaw = last['timestamp'] as String?;
+      final lastTs = lastTsRaw == null ? null : DateTime.tryParse(lastTsRaw);
+
+      if (lastTs != null) {
+        final delta = DateTime.now().difference(lastTs);
+        final lastBoot = (last['boot_count'] as int?) ?? -1;
+        final lastBattery = (last['battery_pct'] as int?) ?? -1;
+        final lastTemp = (last['temperature'] as int?) ?? -999;
+        final lastRssi = (last['rssi'] as int?) ?? -999;
+        final lastGpsValid = ((last['gps_valid'] as int?) ?? 0) == 1;
+
+        final sameCore =
+            lastBoot == bootCount &&
+            lastBattery == batteryPct &&
+            lastTemp == temperature &&
+            (lastRssi - rssi).abs() <= 2;
+
+        if (sameCore && delta <= _storicoDedupWindow) {
+          final bothNoGps = !lastGpsValid && !gpsValid;
+          final bothGps = lastGpsValid && gpsValid;
+
+          if (bothNoGps) return;
+
+          if (bothGps) {
+            final lastLat = (last['latitude'] as num?)?.toDouble();
+            final lastLon = (last['longitude'] as num?)?.toDouble();
+            final nearLat = lastLat != null &&
+                latitude != null &&
+                (lastLat - latitude).abs() < 0.00005;
+            final nearLon = lastLon != null &&
+                longitude != null &&
+                (lastLon - longitude).abs() < 0.00005;
+            if (nearLat && nearLon) return;
+          }
+        }
+      }
+    }
+
     await db.insert('storico', {
       'tag_id': tagId,
       'master_id': masterId,
-      'timestamp': DateTime.now().toIso8601String(),
+      'timestamp': nowIso,
       'latitude': latitude,
       'longitude': longitude,
       'gps_valid': gpsValid ? 1 : 0,
@@ -301,6 +362,40 @@ class DatabaseService {
     return int.tryParse(valore ?? '0') ?? 0;
   }
 
+  Future<List<Map<String, dynamic>>> getTuttaConfigurazione() async {
+    final db = await database;
+    return db.query('configurazione', orderBy: 'chiave ASC');
+  }
+
+  Future<List<Map<String, dynamic>>> getStoricoCompleto() async {
+    final db = await database;
+    return db.query('storico', orderBy: 'id ASC');
+  }
+
+  Future<List<Map<String, dynamic>>> getStoricoDaId(
+    int minIdExclusive, {
+    int limit = 500,
+  }) async {
+    final db = await database;
+    return db.query(
+      'storico',
+      where: 'id > ?',
+      whereArgs: [minIdExclusive],
+      orderBy: 'id ASC',
+      limit: limit,
+    );
+  }
+
+  Future<int> getMaxStoricoId() async {
+    final db = await database;
+    final result = await db.rawQuery('SELECT MAX(id) AS max_id FROM storico');
+    if (result.isEmpty) return 0;
+    final raw = result.first['max_id'];
+    if (raw == null) return 0;
+    if (raw is int) return raw;
+    return int.tryParse('$raw') ?? 0;
+  }
+
   Future<bool> isModalitaIbrida() async {
     return (await getNumeroMaster()) > 0;
   }
@@ -310,11 +405,38 @@ class DatabaseService {
     final importedAt = DateTime.now().toIso8601String();
     final importedAtDt = DateTime.parse(importedAt);
 
+    // Deduplica in memoria: mappa key = "tag|master|timestamp" -> best record
+    final dupMap = <String, Map<String, dynamic>>{};
+
     for (final r in records) {
+      final rawTagId = r['tag_id'];
+      final tagId = rawTagId is int ? rawTagId : int.tryParse('$rawTagId') ?? 0;
+      if (tagId <= 0) continue;
+
       final rawMasterId = r['master_id'];
       final masterId = rawMasterId is int
           ? (rawMasterId > 0 ? rawMasterId : null)
           : int.tryParse('$rawMasterId');
+
+      final rawRssi = r['rssi'];
+      final rssi = rawRssi is int ? rawRssi : int.tryParse('$rawRssi') ?? 0;
+      final rawBatteryPct = r['battery_pct'];
+      final batteryPct = rawBatteryPct is int
+          ? rawBatteryPct
+          : int.tryParse('$rawBatteryPct') ?? 0;
+      final rawTemperature = r['temperature'];
+      final temperature = rawTemperature is int
+          ? rawTemperature
+          : int.tryParse('$rawTemperature') ?? 0;
+
+      final rawLat = r['latitude'];
+      final latitude = rawLat is num ? rawLat.toDouble() : double.tryParse('$rawLat');
+      final rawLon = r['longitude'];
+      final longitude = rawLon is num
+          ? rawLon.toDouble()
+          : double.tryParse('$rawLon');
+
+      final gpsValid = (r['gps_valid'] == true) || (r['gps_valid'] == 1) || (r['gps_valid'] == '1');
 
       final rawTimestamp = r['timestamp'];
       final timestampSeconds = rawTimestamp is int
@@ -324,19 +446,98 @@ class DatabaseService {
         timestampSeconds,
         fallback: importedAtDt,
       );
+
+      final timestampIso = ts.toIso8601String();
+      final masterIdKey = (masterId != null && masterId > 0) ? masterId : 0;
+      final dupKey = '$tagId|$masterIdKey|$timestampIso';
+
+      final existing = dupMap[dupKey];
+      if (existing != null) {
+        // Tieni quello con GPS valido, oppure RSSI migliore se entrambi no-GPS
+        final existingGpsValid = (existing['gps_valid'] == true) ||
+            (existing['gps_valid'] == 1) ||
+            (existing['gps_valid'] == '1');
+        if (!existingGpsValid && gpsValid) {
+          // Nuovo record ha GPS e il vecchio no, sostituisci
+          dupMap[dupKey] = {
+            'tag_id': tagId,
+            'master_id': masterIdKey,
+            'timestamp': timestampIso,
+            'latitude': latitude,
+            'longitude': longitude,
+            'gps_valid': gpsValid,
+            'battery_pct': batteryPct,
+            'temperature': temperature,
+            'rssi': rssi,
+          };
+        } else if (existingGpsValid == gpsValid) {
+          // Stessa condizione GPS: tieni il RSSI migliore
+          final existingRssi = (existing['rssi'] as int?) ?? -999;
+          if (rssi > existingRssi) {
+            dupMap[dupKey] = {
+              'tag_id': tagId,
+              'master_id': masterIdKey,
+              'timestamp': timestampIso,
+              'latitude': latitude,
+              'longitude': longitude,
+              'gps_valid': gpsValid,
+              'battery_pct': batteryPct,
+              'temperature': temperature,
+              'rssi': rssi,
+            };
+          }
+        }
+      } else {
+        // Primo record per questa key
+        dupMap[dupKey] = {
+          'tag_id': tagId,
+          'master_id': masterIdKey,
+          'timestamp': timestampIso,
+          'latitude': latitude,
+          'longitude': longitude,
+          'gps_valid': gpsValid,
+          'battery_pct': batteryPct,
+          'temperature': temperature,
+          'rssi': rssi,
+        };
+      }
+    }
+
+    // Ora salva solo i record deduplicati, controllando anche il DB per non reimportare vecchi eventi
+    for (final rec in dupMap.values) {
+      final tagId = rec['tag_id'] as int;
+      final masterIdKey = rec['master_id'] as int;
+      final timestampIso = rec['timestamp'] as String;
+      final latitude = rec['latitude'] as double?;
+      final longitude = rec['longitude'] as double?;
+      final gpsValid = rec['gps_valid'] as bool;
+      final batteryPct = rec['battery_pct'] as int;
+      final temperature = rec['temperature'] as int;
+      final rssi = rec['rssi'] as int;
+
+      // Controlla se esiste già nel DB
+      final existing = await db.query(
+        'storico',
+        columns: ['id'],
+        where: 'tag_id = ? AND COALESCE(master_id, 0) = ? AND timestamp = ?',
+        whereArgs: [tagId, masterIdKey, timestampIso],
+        limit: 1,
+      );
+      if (existing.isNotEmpty) continue;
+
       await db.insert('storico', {
-        'tag_id': r['tag_id'],
-        'master_id': (masterId != null && masterId > 0) ? masterId : null,
-        'timestamp': ts.toIso8601String(),
+        'tag_id': tagId,
+        'master_id': (masterIdKey > 0) ? masterIdKey : null,
+        'timestamp': timestampIso,
         'imported_at': importedAt,
-        'latitude': r['latitude'],
-        'longitude': r['longitude'],
-        'gps_valid': (r['gps_valid'] == true) ? 1 : 0,
+        'latitude': latitude,
+        'longitude': longitude,
+        'gps_valid': gpsValid ? 1 : 0,
         'boot_count': 0,
-        'battery_pct': r['battery_pct'],
+        'battery_pct': batteryPct,
         'battery_mv': 0,
-        'temperature': r['temperature'],
-        'rssi': r['rssi'],
+        'temperature': temperature,
+        'rssi': rssi,
       });
     }
   }

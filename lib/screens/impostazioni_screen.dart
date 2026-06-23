@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import '../services/database_service.dart';
+import 'supabase_screen.dart';
 
 class ImpostazioniScreen extends StatefulWidget {
   const ImpostazioniScreen({super.key});
@@ -91,9 +92,10 @@ class _ImpostazioniScreenState extends State<ImpostazioniScreen> {
             )
           : Padding(
               padding: const EdgeInsets.all(16),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
+              child: SingleChildScrollView(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
                   const Text(
                     'CONFIGURAZIONE MASTER',
                     style: TextStyle(
@@ -162,6 +164,27 @@ class _ImpostazioniScreenState extends State<ImpostazioniScreen> {
                   ),
                   const SizedBox(height: 24),
 
+                  const Divider(color: Colors.white12),
+                  const SizedBox(height: 16),
+                  SizedBox(
+                    width: double.infinity,
+                    child: OutlinedButton.icon(
+                      onPressed: () {
+                        Navigator.push(
+                          context,
+                          MaterialPageRoute(builder: (_) => const SupabaseScreen()),
+                        );
+                      },
+                      style: OutlinedButton.styleFrom(
+                        side: const BorderSide(color: Color(0xFF2DFF6E)),
+                        foregroundColor: const Color(0xFF2DFF6E),
+                      ),
+                      icon: const Icon(Icons.cloud_sync),
+                      label: const Text('CLOUD E SYNC (SUPABASE)'),
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+
                   SizedBox(
                     width: double.infinity,
                     height: 50,
@@ -183,6 +206,7 @@ class _ImpostazioniScreenState extends State<ImpostazioniScreen> {
                     ),
                   ),
                 ],
+              ),
               ),
             ),
     );

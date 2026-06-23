@@ -1,10 +1,21 @@
 import 'package:flutter/material.dart';
 import 'package:permission_handler/permission_handler.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 import 'screens/home_screen.dart';
 import 'screens/wizard_screen.dart';
 import 'services/database_service.dart';
+import 'supabase/supabase_config.dart';
 
-void main() {
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+
+  if (SupabaseConfig.isConfigured) {
+    await Supabase.initialize(
+      url: SupabaseConfig.normalizedUrl,
+      anonKey: SupabaseConfig.anonKey.trim(),
+    );
+  }
+
   runApp(const GreggeSmartApp());
 }
 

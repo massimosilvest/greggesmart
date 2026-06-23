@@ -8,6 +8,7 @@ import 'package:permission_handler/permission_handler.dart';
 import '../services/ble_scanner.dart';
 import '../services/database_service.dart';
 import '../services/gateway_service.dart';
+import '../services/supabase_service.dart';
 import '../models/tag_device.dart';
 import '../widgets/tag_card.dart';
 import '../utils/ble_utils.dart';
@@ -15,6 +16,7 @@ import 'associa_screen.dart';
 import 'database_viewer_screen.dart';
 import 'dettaglio_master_screen.dart';
 import 'impostazioni_screen.dart';
+import 'supabase_screen.dart';
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -31,6 +33,7 @@ class _HomeScreenState extends State<HomeScreen> {
   bool _centroInizialeRisolto = false;
   final BleScanner _scanner = BleScanner();
   final DatabaseService _db = DatabaseService();
+  final SupabaseService _supabaseService = SupabaseService();
   Map<int, TagDevice> _tags = {};
   Map<int, Map<String, dynamic>> _pecore = {};
   Map<int, Map<String, dynamic>> _master = {};
@@ -38,6 +41,7 @@ class _HomeScreenState extends State<HomeScreen> {
   bool _isScanning = false;
   bool _bluetoothOn = true;
   Timer? _refreshTimer;
+  Timer? _cloudRetryTimer;
   int _numeroMaster = 0;
   int _selectedTabIndex = 0;
   int _dataModeIndex = 0;
@@ -52,6 +56,7 @@ class _HomeScreenState extends State<HomeScreen> {
   DateTime? _masterDeficitSince;
   final TextEditingController _tagSearchController = TextEditingController();
   String _tagSearchQuery = '';
+  final Map<int, int> _ultimoBootGpsNomadeSalvato = <int, int>{};
 
   static const String _cfgPhoneLat = 'last_phone_lat';
   static const String _cfgPhoneLon = 'last_phone_lon';
@@ -90,6 +95,10 @@ class _HomeScreenState extends State<HomeScreen> {
     _caricaTuttiDati();
     _caricaTracciaStorico();
     _requestAndScan();
+
+    _cloudRetryTimer = Timer.periodic(const Duration(minutes: 3), (_) {
+      unawaited(_retryCloudSyncInBackground());
+    });
 
     _refreshTimer = Timer.periodic(const Duration(seconds: 30), (_) {
       if (mounted) {
@@ -305,10 +314,25 @@ class _HomeScreenState extends State<HomeScreen> {
   void dispose() {
     _phonePositionSub?.cancel();
     _refreshTimer?.cancel();
+    _cloudRetryTimer?.cancel();
     _downloadTimeout?.cancel();
     _tagSearchController.dispose();
     _scanner.dispose();
     super.dispose();
+  }
+
+  Future<void> _retryCloudSyncInBackground() async {
+    final result = await _supabaseService.retryPendingIfOnline();
+    if (result == null || !mounted) return;
+    if (result.status == CloudSyncStatus.synced) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Sync cloud in coda completata automaticamente.'),
+          duration: Duration(seconds: 2),
+          backgroundColor: Colors.green,
+        ),
+      );
+    }
   }
 
   Future<void> _avviaTrackingPosizionePastore() async {
@@ -470,6 +494,8 @@ class _HomeScreenState extends State<HomeScreen> {
 
     for (final tag in tags.values) {
       if (!tag.isSlave) continue;
+      final ultimoBoot = _ultimoBootGpsNomadeSalvato[tag.tagId];
+      if (ultimoBoot == tag.bootCount) continue;
 
       await _db.salvaTrasmissione(
         tagId: tag.tagId,
@@ -483,6 +509,7 @@ class _HomeScreenState extends State<HomeScreen> {
         temperature: tag.temperature,
         rssi: tag.rssi,
       );
+      _ultimoBootGpsNomadeSalvato[tag.tagId] = tag.bootCount;
     }
   }
 
@@ -692,6 +719,17 @@ class _HomeScreenState extends State<HomeScreen> {
       final slaveAssociati = _slaveMasterByDb.values
           .where((id) => id == masterId)
           .length;
+      final cloud = await _supabaseService.syncAfterGatewayWithFallback();
+
+      String cloudInfo;
+      if (cloud.status == CloudSyncStatus.synced) {
+        cloudInfo = 'Cloud: sync completata.';
+      } else if (cloud.status == CloudSyncStatus.queuedOffline) {
+        cloudInfo =
+            'Cloud: niente copertura dati, sync in coda (${cloud.pendingCount}).';
+      } else {
+        cloudInfo = 'Cloud: non configurato.';
+      }
 
       closeDialogIfOpen();
 
@@ -703,8 +741,8 @@ class _HomeScreenState extends State<HomeScreen> {
           SnackBar(
             content: Text(
               download.records.isEmpty
-                  ? 'Download completato: 0 record (nessun nuovo dato). $resetInfo'
-                  : 'Scaricati ${download.records.length} record. Slave ora associati a questo master: $slaveAssociati. $resetInfo',
+                  ? 'Download completato: 0 record (nessun nuovo dato). $resetInfo $cloudInfo'
+                  : 'Scaricati ${download.records.length} record. Slave ora associati a questo master: $slaveAssociati. $resetInfo $cloudInfo',
             ),
             backgroundColor: download.records.isEmpty
                 ? Colors.orange
@@ -1789,6 +1827,14 @@ class _HomeScreenState extends State<HomeScreen> {
       return;
     }
 
+    if (value == 'supabase') {
+      await Navigator.push(
+        context,
+        MaterialPageRoute(builder: (_) => const SupabaseScreen()),
+      );
+      return;
+    }
+
     if (value == 'login' && mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
@@ -1831,6 +1877,10 @@ class _HomeScreenState extends State<HomeScreen> {
               PopupMenuItem<String>(
                 value: 'database',
                 child: Text('Database', style: TextStyle(color: Colors.white)),
+              ),
+              PopupMenuItem<String>(
+                value: 'supabase',
+                child: Text('Test e Sync', style: TextStyle(color: Colors.white)),
               ),
               PopupMenuItem<String>(
                 value: 'settings',
