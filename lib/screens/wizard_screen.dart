@@ -30,7 +30,7 @@ class _WizardScreenState extends State<WizardScreen> {
         automaticallyImplyLeading: false,
       ),
       body: SafeArea(
-        child: Padding(
+        child: SingleChildScrollView(
           padding: const EdgeInsets.all(24),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
@@ -55,9 +55,7 @@ class _WizardScreenState extends State<WizardScreen> {
                 'Con master = 0 non cambia nulla (solo smartphone). Con master >= 1 il sistema usa sempre 1 gateway dedicato e permanente, oltre ai master reali. Potrai modificare questa configurazione in qualsiasi momento dalle impostazioni.',
                 style: TextStyle(color: Colors.white38, fontSize: 12),
               ),
-              const Spacer(),
-
-              // Numero grande al centro
+              const SizedBox(height: 28),
               Center(
                 child: Text(
                   '$_numeroMaster',
@@ -75,12 +73,11 @@ class _WizardScreenState extends State<WizardScreen> {
                       : _numeroMaster == 1
                       ? '1 master + 1 gateway (obbligatorio)'
                       : '$_numeroMaster master + 1 gateway (obbligatorio)',
+                  textAlign: TextAlign.center,
                   style: const TextStyle(color: Colors.white54, fontSize: 14),
                 ),
               ),
               const SizedBox(height: 24),
-
-              // Slider per selezionare 0-15
               Slider(
                 value: _numeroMaster.toDouble(),
                 min: 0,
@@ -93,7 +90,6 @@ class _WizardScreenState extends State<WizardScreen> {
                   setState(() => _numeroMaster = value.round());
                 },
               ),
-
               const SizedBox(height: 8),
               const Row(
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
@@ -108,9 +104,7 @@ class _WizardScreenState extends State<WizardScreen> {
                   ),
                 ],
               ),
-
-              const Spacer(),
-
+              const SizedBox(height: 28),
               SizedBox(
                 width: double.infinity,
                 height: 50,

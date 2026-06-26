@@ -246,7 +246,7 @@ class SupabaseService {
             },
           )
           .toList();
-      await client.from('app_storico').upsert(rows, onConflict: 'tenant_id,local_id');
+      await _upsertStoricoWithSchemaFallback(client, rows);
     }
 
     if (configurazione.isNotEmpty) {
@@ -349,7 +349,7 @@ class SupabaseService {
           )
           .toList();
 
-      await client.from('app_storico').upsert(rows, onConflict: 'tenant_id,local_id');
+      await _upsertStoricoWithSchemaFallback(client, rows);
       storicoSynced += rows.length;
 
       final lastIdRaw = batch.last['id'];
@@ -430,6 +430,46 @@ class SupabaseService {
 
   Future<void> resetStoricoSyncCursor() async {
     await _db.salvaConfigurazione(_cfgLastStoricoSyncedId, '0');
+  }
+
+  Future<void> _upsertStoricoWithSchemaFallback(
+    SupabaseClient client,
+    List<Map<String, dynamic>> rows,
+  ) async {
+    try {
+      await client.from('app_storico').upsert(
+        rows,
+        onConflict: 'tenant_id,local_id',
+      );
+      return;
+    } catch (e) {
+      final msg = '$e'.toLowerCase();
+      final missingNoTag =
+          msg.contains('no_tag_seen') || msg.contains('no_tag_see');
+      final missingWake = msg.contains('wake_del_ciclo');
+      final missingOptionalColumns =
+          e is PostgrestException &&
+          e.code == 'PGRST204' &&
+          (missingNoTag || missingWake);
+
+      if (!missingOptionalColumns) {
+        rethrow;
+      }
+
+      final fallbackRows = rows
+          .map((row) {
+            final copy = Map<String, dynamic>.from(row);
+            copy.remove('no_tag_seen');
+            copy.remove('wake_del_ciclo');
+            return copy;
+          })
+          .toList();
+
+      await client.from('app_storico').upsert(
+        fallbackRows,
+        onConflict: 'tenant_id,local_id',
+      );
+    }
   }
 }
 

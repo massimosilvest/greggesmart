@@ -7,11 +7,15 @@ import 'package:latlong2/latlong.dart';
 import 'package:permission_handler/permission_handler.dart';
 import '../services/ble_scanner.dart';
 import '../services/database_service.dart';
+import '../services/gateway_service.dart';
+import '../services/supabase_service.dart';
 import '../models/tag_device.dart';
+import 'database_viewer_screen.dart';
 import '../widgets/tag_card.dart';
 import '../utils/ble_utils.dart';
 import 'associa_screen.dart';
 import 'dettaglio_master_screen.dart';
+import 'login_screen.dart';
 import 'impostazioni_screen.dart';
 
 class HomeScreen extends StatefulWidget {
@@ -25,6 +29,8 @@ class _HomeScreenState extends State<HomeScreen> {
   final MapController _mapController = MapController();
   bool _mappaInizializzata = false;
   final BleScanner _scanner = BleScanner();
+  final GatewayService _gatewayService = GatewayService();
+  final SupabaseService _supabaseService = SupabaseService();
   final DatabaseService _db = DatabaseService();
   Map<int, TagDevice> _tags = {};
   Map<int, Map<String, dynamic>> _pecore = {};
@@ -32,9 +38,34 @@ class _HomeScreenState extends State<HomeScreen> {
   Map<int, int> _slaveMasterByDb = {};
   bool _isScanning = false;
   bool _bluetoothOn = true;
+  bool _gatewayInCorso = false;
   Timer? _refreshTimer;
   int _numeroMaster = 0;
-  int _selectedTabIndex = 0;
+  int _rootTabIndex = 0;
+  int _dataModeIndex = 0;
+  int _mapModeIndex = 0;
+
+  Future<void> _apriDatabase() async {
+    await Navigator.push(
+      context,
+      MaterialPageRoute(builder: (_) => const DatabaseViewerScreen()),
+    );
+  }
+
+  Future<void> _apriImpostazioni() async {
+    await Navigator.push(
+      context,
+      MaterialPageRoute(builder: (_) => const ImpostazioniScreen()),
+    );
+    await _ricaricaDati();
+  }
+
+  Future<void> _apriLogin() async {
+    await Navigator.push(
+      context,
+      MaterialPageRoute(builder: (_) => const LoginScreen()),
+    );
+  }
 
   @override
   void initState() {
@@ -66,6 +97,16 @@ class _HomeScreenState extends State<HomeScreen> {
         setState(() {});
       }
     });
+  }
+
+  void _switchToDataTab(int index) {
+    if (index < 0 || index > 1) return;
+    setState(() => _dataModeIndex = index);
+  }
+
+  void _switchToMapTab(int index) {
+    if (index < 0 || index > 1) return;
+    setState(() => _mapModeIndex = index);
   }
 
   Future<void> _caricaTuttiDati() async {
@@ -199,6 +240,104 @@ class _HomeScreenState extends State<HomeScreen> {
         ],
       ),
     );
+  }
+
+  Future<void> _scaricaGateway() async {
+    if (_gatewayInCorso) return;
+    if (_numeroMaster <= 0) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Gateway disponibile solo con almeno 1 master.'),
+          duration: Duration(seconds: 2),
+        ),
+      );
+      return;
+    }
+
+    final masters = _tags.values.where((tag) => tag.isMaster).toList()
+      ..sort((a, b) {
+        if (a.gatewayMode != b.gatewayMode) {
+          return a.gatewayMode ? -1 : 1;
+        }
+        return b.rssi.compareTo(a.rssi);
+      });
+
+    if (masters.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Nessun gateway/master live trovato per il download.'),
+          duration: Duration(seconds: 2),
+        ),
+      );
+      return;
+    }
+
+    setState(() => _gatewayInCorso = true);
+    _pausaScanPerGateway();
+
+    try {
+      GatewayDownloadResult? result;
+      Object? lastError;
+      TagDevice? selectedTarget;
+
+      for (final candidate in masters) {
+        if (!mounted) return;
+        selectedTarget = candidate;
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              'Tentativo gateway su ${candidate.tagIdHex} (${candidate.rssi} dBm)...',
+            ),
+            duration: const Duration(seconds: 2),
+          ),
+        );
+
+        try {
+          result = await _gatewayService.scaricaDaGateway(
+            masterId: candidate.tagId,
+            expectedMasterCount: _numeroMaster,
+            onStatus: (status) {
+              debugPrint('GATEWAY ${candidate.tagIdHex}: $status');
+            },
+          );
+          break;
+        } catch (e) {
+          lastError = e;
+          debugPrint('Tentativo gateway fallito su ${candidate.tagIdHex}: $e');
+        }
+      }
+
+      if (result == null) {
+        throw Exception(lastError ?? 'Nessun gateway raggiungibile');
+      }
+
+      await _db.salvaDatiGateway(result.records);
+      await _caricaTuttiDati();
+      final cloud = await _supabaseService.syncAfterGatewayWithFallback();
+
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            '${result.clearSent ? 'Gateway ${selectedTarget?.tagIdHex ?? ''} scaricato e memoria confermata.' : 'Gateway ${selectedTarget?.tagIdHex ?? ''} scaricato senza reset memoria.'} Sync cloud: ${cloud.message}',
+          ),
+          duration: const Duration(seconds: 3),
+        ),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Download gateway fallito: $e'),
+          duration: const Duration(seconds: 3),
+        ),
+      );
+    } finally {
+      _riprendiScanDopoGateway();
+      if (mounted) {
+        setState(() => _gatewayInCorso = false);
+      }
+    }
   }
 
   @override
@@ -744,17 +883,150 @@ class _HomeScreenState extends State<HomeScreen> {
     return ListView(children: children);
   }
 
+  Future<List<Map<String, dynamic>>> _caricaStoricoMappaOggi() {
+    final now = DateTime.now();
+    final from = DateTime(now.year, now.month, now.day);
+    return _db.getStoricoTracciaGps(from: from, to: now);
+  }
+
+  Widget _buildMapStoricoTab() {
+    return FutureBuilder<List<Map<String, dynamic>>>(
+      future: _caricaStoricoMappaOggi(),
+      builder: (context, snapshot) {
+        if (!snapshot.hasData) {
+          return const Center(
+            child: CircularProgressIndicator(color: Color(0xFF2DFF6E)),
+          );
+        }
+
+        final rows = snapshot.data!;
+        final points = rows
+            .where(
+              (row) => row['latitude'] != null && row['longitude'] != null,
+            )
+            .map(
+              (row) => LatLng(
+                (row['latitude'] as num).toDouble(),
+                (row['longitude'] as num).toDouble(),
+              ),
+            )
+            .toList();
+
+        final center = points.isNotEmpty
+            ? points.last
+            : (_centroFallback ?? const LatLng(41.9028, 12.4964));
+
+        final markers = <Marker>[];
+        for (var i = 0; i < points.length; i++) {
+          markers.add(
+            Marker(
+              point: points[i],
+              width: 28,
+              height: 28,
+              child: Container(
+                decoration: BoxDecoration(
+                  color: i == points.length - 1
+                      ? const Color(0xFF2DFF6E)
+                      : const Color(0xFF2D9BFF),
+                  shape: BoxShape.circle,
+                ),
+              ),
+            ),
+          );
+        }
+
+        return ListView(
+          children: [
+            const _SectionHeader(
+              title: 'MAPPA STORICO',
+              subtitle: 'Traccia GPS di oggi ricostruita dal database',
+            ),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 12),
+              child: ClipRRect(
+                borderRadius: BorderRadius.circular(16),
+                child: SizedBox(
+                  height: 320,
+                  child: Stack(
+                    children: [
+                      FlutterMap(
+                        options: MapOptions(
+                          initialCenter: center,
+                          initialZoom: points.length > 1 ? 12.0 : 14.0,
+                        ),
+                        children: [
+                          TileLayer(
+                            urlTemplate:
+                                'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+                            userAgentPackageName: 'com.greggesmart.app',
+                          ),
+                          MarkerLayer(markers: markers),
+                        ],
+                      ),
+                      if (points.isEmpty)
+                        Container(
+                          color: Colors.black.withValues(alpha: 0.35),
+                          alignment: Alignment.center,
+                          child: const Padding(
+                            padding: EdgeInsets.all(16),
+                            child: Text(
+                              'Nessun punto storico con GPS valido oggi.',
+                              textAlign: TextAlign.center,
+                              style: TextStyle(color: Colors.white70),
+                            ),
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 10, 16, 4),
+              child: Text(
+                'Punti storici oggi: ${points.length}',
+                style: const TextStyle(color: Colors.white54, fontSize: 12),
+              ),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  Widget _buildModeSwitch({
+    required int selectedIndex,
+    required void Function(int) onPressed,
+  }) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(12, 12, 12, 6),
+      child: ToggleButtons(
+        isSelected: [selectedIndex == 0, selectedIndex == 1],
+        onPressed: onPressed,
+        borderRadius: BorderRadius.circular(14),
+        borderColor: Colors.white24,
+        selectedBorderColor: const Color(0xFF2DFF6E),
+        selectedColor: Colors.black,
+        fillColor: const Color(0xFF2DFF6E),
+        color: Colors.white70,
+        constraints: const BoxConstraints(minHeight: 40, minWidth: 130),
+        children: const [Text('LIVE'), Text('STORICO')],
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
-    final tabTitles = ['Live BLE', 'Albero', 'Mappa'];
-    final tabIcons = [Icons.radar, Icons.account_tree, Icons.map];
+    final tabTitles = ['Dati', 'Gateway', 'Mappa'];
+    final tabIcons = [Icons.folder_open, Icons.cloud_download, Icons.map];
+    final appBarTitle = _rootTabIndex == 2 ? 'Mappa' : 'Dati';
 
     return Scaffold(
       backgroundColor: const Color(0xFF0A1A0F),
       appBar: AppBar(
         backgroundColor: const Color(0xFF0F2318),
         title: Text(
-          tabTitles[_selectedTabIndex],
+          appBarTitle,
           style: TextStyle(color: Color(0xFF2DFF6E)),
         ),
         actions: [
@@ -763,15 +1035,51 @@ class _HomeScreenState extends State<HomeScreen> {
             color: _bluetoothOn ? const Color(0xFF2DFF6E) : Colors.red,
           ),
           const SizedBox(width: 4),
-          IconButton(
+          PopupMenuButton<_HomeMenuAction>(
             icon: const Icon(Icons.settings, color: Color(0xFF2DFF6E)),
-            onPressed: () async {
-              await Navigator.push(
-                context,
-                MaterialPageRoute(builder: (_) => const ImpostazioniScreen()),
-              );
-              _ricaricaDati();
+            color: const Color(0xFF0F2318),
+            onSelected: (action) async {
+              switch (action) {
+                case _HomeMenuAction.database:
+                  await _apriDatabase();
+                  break;
+                case _HomeMenuAction.impostazioni:
+                  await _apriImpostazioni();
+                  break;
+                case _HomeMenuAction.login:
+                  await _apriLogin();
+                  break;
+              }
             },
+            itemBuilder: (context) => const [
+              PopupMenuItem(
+                value: _HomeMenuAction.database,
+                child: ListTile(
+                  dense: true,
+                  contentPadding: EdgeInsets.zero,
+                  leading: Icon(Icons.storage, color: Color(0xFF2DFF6E)),
+                  title: Text('Database'),
+                ),
+              ),
+              PopupMenuItem(
+                value: _HomeMenuAction.impostazioni,
+                child: ListTile(
+                  dense: true,
+                  contentPadding: EdgeInsets.zero,
+                  leading: Icon(Icons.tune, color: Color(0xFF2DFF6E)),
+                  title: Text('Impostazioni'),
+                ),
+              ),
+              PopupMenuItem(
+                value: _HomeMenuAction.login,
+                child: ListTile(
+                  dense: true,
+                  contentPadding: EdgeInsets.zero,
+                  leading: Icon(Icons.login, color: Color(0xFF2DFF6E)),
+                  title: Text('Login'),
+                ),
+              ),
+            ],
           ),
           IconButton(
             icon: Icon(
@@ -783,12 +1091,43 @@ class _HomeScreenState extends State<HomeScreen> {
         ],
       ),
       body: IndexedStack(
-        index: _selectedTabIndex,
-        children: [_buildLiveTab(), _buildTreeTab(), _buildMapTab()],
+        index: _rootTabIndex == 2 ? 1 : 0,
+        children: [
+          Column(
+            children: [
+              _buildModeSwitch(
+                selectedIndex: _dataModeIndex,
+                onPressed: _switchToDataTab,
+              ),
+              Expanded(
+                child: _dataModeIndex == 0 ? _buildLiveTab() : _buildTreeTab(),
+              ),
+            ],
+          ),
+          Column(
+            children: [
+              _buildModeSwitch(
+                selectedIndex: _mapModeIndex,
+                onPressed: _switchToMapTab,
+              ),
+              Expanded(
+                child: _mapModeIndex == 0
+                    ? _buildMapTab()
+                    : _buildMapStoricoTab(),
+              ),
+            ],
+          ),
+        ],
       ),
       bottomNavigationBar: BottomNavigationBar(
-        currentIndex: _selectedTabIndex,
-        onTap: (index) => setState(() => _selectedTabIndex = index),
+        currentIndex: _rootTabIndex,
+        onTap: (index) {
+          if (index == 1) {
+            _scaricaGateway();
+            return;
+          }
+          setState(() => _rootTabIndex = index);
+        },
         backgroundColor: const Color(0xFF0F2318),
         selectedItemColor: const Color(0xFF2DFF6E),
         unselectedItemColor: Colors.white54,
@@ -836,6 +1175,8 @@ class _SectionHeader extends StatelessWidget {
     );
   }
 }
+
+enum _HomeMenuAction { database, impostazioni, login }
 
 class _CardAssenteSlave extends StatelessWidget {
   final Map<String, dynamic> pecora;
