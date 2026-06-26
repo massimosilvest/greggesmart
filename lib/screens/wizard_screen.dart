@@ -47,12 +47,12 @@ class _WizardScreenState extends State<WizardScreen> {
               ),
               const SizedBox(height: 8),
               const Text(
-                'Quanti master hai nel gregge?',
+                'Quanti master reali hai nel gregge?',
                 style: TextStyle(color: Colors.white70, fontSize: 16),
               ),
               const SizedBox(height: 8),
               const Text(
-                'Questo numero serve per verificare che tutti i master abbiano sincronizzato prima di scaricare i dati. Potrai modificarlo in qualsiasi momento dalle impostazioni.',
+                'Con master = 0 non cambia nulla (solo smartphone). Con master >= 1 il sistema usa sempre 1 gateway dedicato e permanente, oltre ai master reali. Potrai modificare questa configurazione in qualsiasi momento dalle impostazioni.',
                 style: TextStyle(color: Colors.white38, fontSize: 12),
               ),
               const Spacer(),
@@ -73,8 +73,8 @@ class _WizardScreenState extends State<WizardScreen> {
                   _numeroMaster == 0
                       ? 'Nessun master — solo smartphone'
                       : _numeroMaster == 1
-                      ? '1 master'
-                      : '$_numeroMaster master',
+                      ? '1 master + 1 gateway (obbligatorio)'
+                      : '$_numeroMaster master + 1 gateway (obbligatorio)',
                   style: const TextStyle(color: Colors.white54, fontSize: 14),
                 ),
               ),

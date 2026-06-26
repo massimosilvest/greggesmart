@@ -38,7 +38,7 @@ class SupabaseService {
     try {
       await Supabase.initialize(
         url: SupabaseConfig.normalizedUrl,
-        anonKey: SupabaseConfig.anonKey.trim(),
+        publishableKey: SupabaseConfig.anonKey.trim(),
       );
       _initialized = true;
     } catch (e) {
@@ -236,6 +236,8 @@ class SupabaseService {
               'latitude': row['latitude'],
               'longitude': row['longitude'],
               'gps_valid': row['gps_valid'],
+              'no_tag_seen': row['no_tag_seen'],
+              'wake_del_ciclo': row['wake_del_ciclo'],
               'boot_count': row['boot_count'],
               'battery_pct': row['battery_pct'],
               'battery_mv': row['battery_mv'],
@@ -336,6 +338,8 @@ class SupabaseService {
               'latitude': row['latitude'],
               'longitude': row['longitude'],
               'gps_valid': row['gps_valid'],
+              'no_tag_seen': row['no_tag_seen'],
+              'wake_del_ciclo': row['wake_del_ciclo'],
               'boot_count': row['boot_count'],
               'battery_pct': row['battery_pct'],
               'battery_mv': row['battery_mv'],

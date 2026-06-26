@@ -106,7 +106,7 @@ class _ImpostazioniScreenState extends State<ImpostazioniScreen> {
                   ),
                   const SizedBox(height: 12),
                   const Text(
-                    'Numero esatto di master nel gregge. Serve per verificare la sincronizzazione completa prima del download.',
+                    'Numero esatto di master reali nel gregge. Con valore >= 1 il sistema prevede sempre anche 1 gateway dedicato e permanente.',
                     style: TextStyle(color: Colors.white54, fontSize: 13),
                   ),
                   const SizedBox(height: 32),
@@ -126,8 +126,8 @@ class _ImpostazioniScreenState extends State<ImpostazioniScreen> {
                       _numeroMaster == 0
                           ? 'Nessun master — solo smartphone'
                           : _numeroMaster == 1
-                          ? '1 master'
-                          : '$_numeroMaster master',
+                          ? '1 master + 1 gateway (obbligatorio)'
+                          : '$_numeroMaster master + 1 gateway (obbligatorio)',
                       style: const TextStyle(
                         color: Colors.white54,
                         fontSize: 14,

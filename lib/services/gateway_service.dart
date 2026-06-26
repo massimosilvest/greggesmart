@@ -19,10 +19,10 @@ class GatewayService {
     required void Function(String status) onStatus,
   }) async {
     debugPrint('=== INIZIO GATEWAY DOWNLOAD ===');
-    debugPrint('Master ID: 0x${masterId.toRadixString(16).toUpperCase()}');
+    debugPrint('Gateway ID: 0x${masterId.toRadixString(16).toUpperCase()}');
     debugPrint('Expected Masters: $expectedMasterCount');
 
-    onStatus("Ricerca master nelle vicinanze...");
+    onStatus("Ricerca gateway nelle vicinanze...");
 
     BluetoothDevice? targetDevice;
     final foundTarget = Completer<void>();
@@ -31,7 +31,7 @@ class GatewayService {
     final ultimiNomi = <String>[];
     debugPrint('DEBUG: cerco master con hex: $masterIdHex');
     onStatus(
-      'Scansione BLE avviata (target master: 0x${masterId.toRadixString(16).toUpperCase()})',
+      'Scansione BLE avviata (target gateway: 0x${masterId.toRadixString(16).toUpperCase()})',
     );
 
     final subscription = FlutterBluePlus.scanResults.listen((results) {
@@ -73,8 +73,8 @@ class GatewayService {
           debugPrint('DEBUG: MATCH! device: $name id=$remoteId');
           onStatus(
             name.isNotEmpty
-                ? 'Master trovato: $name'
-                : 'Master trovato: $remoteId',
+                ? 'Gateway trovato: $name'
+                : 'Gateway trovato: $remoteId',
           );
           targetDevice = r.device;
           if (!foundTarget.isCompleted) {
@@ -94,12 +94,12 @@ class GatewayService {
 
     if (targetDevice == null) {
       onStatus(
-        'Master non trovato: nessun device con nome o indirizzo che contenga $masterIdHex',
+        'Gateway non trovato: nessun device con nome o indirizzo che contenga $masterIdHex',
       );
-      throw Exception("Master non trovato");
+      throw Exception("Gateway non trovato");
     }
 
-    onStatus("Connessione al master...");
+    onStatus("Connessione al gateway...");
     await targetDevice!.connect(timeout: _connectTimeout);
 
     onStatus("Scoperta servizi...");
@@ -124,7 +124,7 @@ class GatewayService {
 
     if (cmdChar == null || dataChar == null) {
       await targetDevice!.disconnect();
-      onStatus("Servizio gateway non trovato sul master.");
+      onStatus("Servizio gateway non trovato sul device.");
       throw Exception("Servizio non trovato");
     }
 
@@ -146,7 +146,8 @@ class GatewayService {
       debugPrint(
         'DEBUG:   Tag 0x${(r['tag_id'] as int?)?.toRadixString(16).toUpperCase() ?? '?'}'
         ' -> Master 0x${(r['master_id'] as int?)?.toRadixString(16).toUpperCase() ?? 'null'}'
-        ' | TS: ${r['timestamp']} | GPS: ${r['gps_valid']} @ (${r['latitude']}, ${r['longitude']})',
+        ' | TS: ${r['timestamp']} | GPS: ${r['gps_valid']} @ (${r['latitude']}, ${r['longitude']})'
+        ' | noTag: ${r['no_tag_seen']} | wake: ${r['wake_del_ciclo']}',
       );
     }
 
@@ -164,7 +165,7 @@ class GatewayService {
     debugPrint('DEBUG: canClear: $canClear');
 
     if (canClear) {
-      onStatus("Conferma e pulizia memoria master...");
+      onStatus("Conferma e pulizia memoria gateway...");
       await cmdChar.write("CLEAR_DB".codeUnits, withoutResponse: false);
       debugPrint('DEBUG: Comando inviato: CLEAR_DB');
     } else {
@@ -235,7 +236,14 @@ class GatewayService {
 
     for (final riga in righe) {
       final campi = riga.split(',');
-      if (campi.length < 9) continue;
+        if (campi.length < 9) continue;
+
+        final noTagSeen = campi.length >= 10
+          ? (int.tryParse(campi[9]) ?? 0) == 1
+          : false;
+        final wakeDelCiclo = campi.length >= 11
+          ? (int.tryParse(campi[10]) ?? 0)
+          : 0;
 
       records.add({
         'tag_id': int.tryParse(campi[0]) ?? 0,
@@ -247,6 +255,8 @@ class GatewayService {
         'longitude': double.tryParse(campi[6]) ?? 0.0,
         'gps_valid': campi[7] == '1',
         'timestamp': int.tryParse(campi[8]) ?? 0,
+        'no_tag_seen': noTagSeen,
+        'wake_del_ciclo': wakeDelCiclo,
       });
     }
 

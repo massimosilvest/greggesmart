@@ -53,7 +53,7 @@ class _DatabaseViewerScreenState extends State<DatabaseViewerScreen> {
     final config = await db.query('configurazione', orderBy: 'chiave ASC');
     final storico = await db.rawQuery('''
       SELECT id, tag_id, master_id, timestamp, imported_at, rssi, battery_pct,
-             temperature, gps_valid, latitude, longitude
+             temperature, gps_valid, latitude, longitude, no_tag_seen, wake_del_ciclo
       FROM storico
       ORDER BY COALESCE(imported_at, timestamp) DESC, id DESC
       LIMIT 250
@@ -347,6 +347,8 @@ class _DatabaseViewerScreenState extends State<DatabaseViewerScreen> {
         'gps_valid',
         'latitude',
         'longitude',
+        'no_tag_seen',
+        'wake_del_ciclo',
       ];
 
       buffer.writeln(headers.join(','));
@@ -712,10 +714,12 @@ class _DatabaseViewerScreenState extends State<DatabaseViewerScreen> {
                     tileBuilder: (row) {
                       final tagId = _intOrNull(row['tag_id']);
                       final masterId = _intOrNull(row['master_id']);
+                      final noTagSeen = _intOrNull(row['no_tag_seen']) == 1;
+                      final wakeDelCiclo = _intOrNull(row['wake_del_ciclo']) ?? 0;
                       final tagHex = _idHex(tagId);
                       final masterHex = _idHex(masterId);
-                      final ruolo = _ruoloTag(tagId);
-                      final nomeTag = _nomeTag(tagId);
+                      final ruolo = noTagSeen ? 'CICLO' : _ruoloTag(tagId);
+                      final nomeTag = noTagSeen ? 'NESSUN TAG VISTO' : _nomeTag(tagId);
                       final nomeMaster = _nomeTag(masterId);
                       final hasMaster = masterId != null && masterId > 0;
                       final targetLabel = hasMaster
@@ -789,6 +793,14 @@ class _DatabaseViewerScreenState extends State<DatabaseViewerScreen> {
                               style: const TextStyle(
                                 color: Colors.white60,
                                 fontSize: 11,
+                              ),
+                            ),
+                            const SizedBox(height: 2),
+                            Text(
+                              'Ciclo: ${noTagSeen ? 'nessun tag visto' : 'tag presente'}  |  wake=$wakeDelCiclo',
+                              style: const TextStyle(
+                                color: Colors.white54,
+                                fontSize: 10,
                               ),
                             ),
                             const SizedBox(height: 2),

@@ -9,9 +9,6 @@ class DatabaseService {
   static const String _chiaveNumeroMaster = 'numero_master';
   static const Duration _finestraTrasmissioneUtile = Duration(minutes: 10);
   static const int _minTrasmissioniFallbackNoFix = 3;
-  static const int _minPlausibleEpochSeconds = 1577836800; // 2020-01-01
-  static const int _maxPlausibleEpochSeconds = 4102444800; // 2100-01-01
-  static const Duration _storicoDedupWindow = Duration(seconds: 45);
 
   Database? _db;
 
@@ -26,7 +23,7 @@ class DatabaseService {
 
     final db = await openDatabase(
       path,
-      version: 6,
+      version: 7,
       onCreate: (db, version) async {
         await _creaTabelle(db);
       },
@@ -56,11 +53,30 @@ class DatabaseService {
             );
           }
         }
+
+        if (oldVersion < 7) {
+          final info = await db.rawQuery('PRAGMA table_info(storico)');
+          final hasNoTagSeen = info.any((row) => row['name'] == 'no_tag_seen');
+          final hasWakeDelCiclo = info.any(
+            (row) => row['name'] == 'wake_del_ciclo',
+          );
+          if (!hasNoTagSeen) {
+            await db.execute(
+              'ALTER TABLE storico ADD COLUMN no_tag_seen INTEGER DEFAULT 0',
+            );
+          }
+          if (!hasWakeDelCiclo) {
+            await db.execute(
+              'ALTER TABLE storico ADD COLUMN wake_del_ciclo INTEGER DEFAULT 0',
+            );
+          }
+        }
       },
     );
 
     await _assicuraColonnaMasterId(db);
     await _assicuraColonneStoricoGps(db);
+    await _assicuraColonneStoricoCiclo(db);
     return db;
   }
 
@@ -85,6 +101,8 @@ class DatabaseService {
         latitude REAL,
         longitude REAL,
         gps_valid INTEGER DEFAULT 0,
+        no_tag_seen INTEGER DEFAULT 0,
+        wake_del_ciclo INTEGER DEFAULT 0,
         boot_count INTEGER NOT NULL,
         battery_pct INTEGER NOT NULL,
         battery_mv INTEGER NOT NULL,
@@ -179,6 +197,23 @@ class DatabaseService {
     }
   }
 
+  Future<void> _assicuraColonneStoricoCiclo(Database db) async {
+    final info = await db.rawQuery('PRAGMA table_info(storico)');
+    final hasNoTagSeen = info.any((row) => row['name'] == 'no_tag_seen');
+    final hasWakeDelCiclo = info.any((row) => row['name'] == 'wake_del_ciclo');
+
+    if (!hasNoTagSeen) {
+      await db.execute(
+        'ALTER TABLE storico ADD COLUMN no_tag_seen INTEGER DEFAULT 0',
+      );
+    }
+    if (!hasWakeDelCiclo) {
+      await db.execute(
+        'ALTER TABLE storico ADD COLUMN wake_del_ciclo INTEGER DEFAULT 0',
+      );
+    }
+  }
+
   // ── STORICO ─────────────────────────────────────────
 
   Future<void> salvaTrasmissione({
@@ -194,96 +229,10 @@ class DatabaseService {
     required int rssi,
   }) async {
     final db = await database;
-    final nowIso = DateTime.now().toIso8601String();
-
-    final recenti = await db.query(
-      'storico',
-      columns: [
-        'id',
-        'timestamp',
-        'boot_count',
-        'battery_pct',
-        'temperature',
-        'rssi',
-        'gps_valid',
-        'latitude',
-        'longitude',
-      ],
-      where: 'tag_id = ? AND COALESCE(master_id, 0) = ?',
-      whereArgs: [tagId, masterId ?? 0],
-      orderBy: 'id DESC',
-      limit: 1,
-    );
-
-    if (recenti.isNotEmpty) {
-      final last = recenti.first;
-      final lastTsRaw = last['timestamp'] as String?;
-      final lastTs = lastTsRaw == null ? null : DateTime.tryParse(lastTsRaw);
-
-      if (lastTs != null) {
-        final delta = DateTime.now().difference(lastTs);
-        final lastBoot = (last['boot_count'] as int?) ?? -1;
-        final lastBattery = (last['battery_pct'] as int?) ?? -1;
-        final lastTemp = (last['temperature'] as int?) ?? -999;
-        final lastRssi = (last['rssi'] as int?) ?? -999;
-        final lastGpsValid = ((last['gps_valid'] as int?) ?? 0) == 1;
-
-        final sameCore =
-            lastBoot == bootCount &&
-            lastBattery == batteryPct &&
-            lastTemp == temperature &&
-            (lastRssi - rssi).abs() <= 2;
-
-        if (sameCore && delta <= _storicoDedupWindow) {
-          final bothNoGps = !lastGpsValid && !gpsValid;
-          final bothGps = lastGpsValid && gpsValid;
-          final enrichWithGps = !lastGpsValid && gpsValid;
-          final dropNoGpsAfterGps = lastGpsValid && !gpsValid;
-
-          if (bothNoGps) return;
-
-          if (dropNoGpsAfterGps) return;
-
-          if (enrichWithGps) {
-            final lastId = last['id'] as int?;
-            if (lastId != null) {
-              await db.update(
-                'storico',
-                {
-                  'latitude': latitude,
-                  'longitude': longitude,
-                  'gps_valid': 1,
-                  'rssi': rssi,
-                  'battery_pct': batteryPct,
-                  'battery_mv': batteryMv,
-                  'temperature': temperature,
-                },
-                where: 'id = ?',
-                whereArgs: [lastId],
-              );
-              return;
-            }
-          }
-
-          if (bothGps) {
-            final lastLat = (last['latitude'] as num?)?.toDouble();
-            final lastLon = (last['longitude'] as num?)?.toDouble();
-            final nearLat = lastLat != null &&
-                latitude != null &&
-                (lastLat - latitude).abs() < 0.00005;
-            final nearLon = lastLon != null &&
-                longitude != null &&
-                (lastLon - longitude).abs() < 0.00005;
-            if (nearLat && nearLon) return;
-          }
-        }
-      }
-    }
-
     await db.insert('storico', {
       'tag_id': tagId,
       'master_id': masterId,
-      'timestamp': nowIso,
+      'timestamp': DateTime.now().toIso8601String(),
       'latitude': latitude,
       'longitude': longitude,
       'gps_valid': gpsValid ? 1 : 0,
@@ -317,6 +266,25 @@ class DatabaseService {
         .subtract(const Duration(days: 7))
         .toIso8601String();
     await db.delete('storico', where: 'timestamp < ?', whereArgs: [limit]);
+  }
+
+  Future<List<Map<String, dynamic>>> getStoricoCompleto() async {
+    final db = await database;
+    return db.query('storico', orderBy: 'id ASC');
+  }
+
+  Future<List<Map<String, dynamic>>> getStoricoDaId(
+    int fromLocalId, {
+    int limit = 500,
+  }) async {
+    final db = await database;
+    return db.query(
+      'storico',
+      where: 'id > ?',
+      whereArgs: [fromLocalId],
+      orderBy: 'id ASC',
+      limit: limit,
+    );
   }
 
   // ── MASTER ──────────────────────────────────────────
@@ -383,43 +351,14 @@ class DatabaseService {
     return result.isNotEmpty ? result.first['valore'] as String? : null;
   }
 
-  Future<int> getNumeroMaster() async {
-    final valore = await getConfigurazione(_chiaveNumeroMaster);
-    return int.tryParse(valore ?? '0') ?? 0;
-  }
-
   Future<List<Map<String, dynamic>>> getTuttaConfigurazione() async {
     final db = await database;
     return db.query('configurazione', orderBy: 'chiave ASC');
   }
 
-  Future<List<Map<String, dynamic>>> getStoricoCompleto() async {
-    final db = await database;
-    return db.query('storico', orderBy: 'id ASC');
-  }
-
-  Future<List<Map<String, dynamic>>> getStoricoDaId(
-    int minIdExclusive, {
-    int limit = 500,
-  }) async {
-    final db = await database;
-    return db.query(
-      'storico',
-      where: 'id > ?',
-      whereArgs: [minIdExclusive],
-      orderBy: 'id ASC',
-      limit: limit,
-    );
-  }
-
-  Future<int> getMaxStoricoId() async {
-    final db = await database;
-    final result = await db.rawQuery('SELECT MAX(id) AS max_id FROM storico');
-    if (result.isEmpty) return 0;
-    final raw = result.first['max_id'];
-    if (raw == null) return 0;
-    if (raw is int) return raw;
-    return int.tryParse('$raw') ?? 0;
+  Future<int> getNumeroMaster() async {
+    final valore = await getConfigurazione(_chiaveNumeroMaster);
+    return int.tryParse(valore ?? '0') ?? 0;
   }
 
   Future<bool> isModalitaIbrida() async {
@@ -429,187 +368,61 @@ class DatabaseService {
   Future<void> salvaDatiGateway(List<Map<String, dynamic>> records) async {
     final db = await database;
     final importedAt = DateTime.now().toIso8601String();
-    final importedAtDt = DateTime.parse(importedAt);
 
-    // Deduplica in memoria: mappa key = "tag|master|timestamp" -> best record
-    final dupMap = <String, Map<String, dynamic>>{};
-
-    for (final entry in records.asMap().entries) {
-      final rowIndex = entry.key;
-      final r = entry.value;
-      final rawTagId = r['tag_id'];
-      final tagId = rawTagId is int ? rawTagId : int.tryParse('$rawTagId') ?? 0;
-      if (tagId <= 0) continue;
-
+    for (final r in records) {
       final rawMasterId = r['master_id'];
       final masterId = rawMasterId is int
           ? (rawMasterId > 0 ? rawMasterId : null)
           : int.tryParse('$rawMasterId');
+      final noTagSeen = (r['no_tag_seen'] == true || r['no_tag_seen'] == 1);
+      final rawTagId = _asInt(r['tag_id']) ?? 0;
+      final normalizedTagId = noTagSeen ? 0 : rawTagId;
 
-      final rawRssi = r['rssi'];
-      final rssi = rawRssi is int ? rawRssi : int.tryParse('$rawRssi') ?? 0;
-      final rawBatteryPct = r['battery_pct'];
-      final batteryPct = rawBatteryPct is int
-          ? rawBatteryPct
-          : int.tryParse('$rawBatteryPct') ?? 0;
-      final rawTemperature = r['temperature'];
-      final temperature = rawTemperature is int
-          ? rawTemperature
-          : int.tryParse('$rawTemperature') ?? 0;
-
-      final rawLat = r['latitude'];
-      final latitude = rawLat is num ? rawLat.toDouble() : double.tryParse('$rawLat');
-      final rawLon = r['longitude'];
-      final longitude = rawLon is num
-          ? rawLon.toDouble()
-          : double.tryParse('$rawLon');
-
-      final gpsValid = (r['gps_valid'] == true) || (r['gps_valid'] == 1) || (r['gps_valid'] == '1');
-
-      final rawTimestamp = r['timestamp'];
-      final timestampSeconds = rawTimestamp is int
-          ? rawTimestamp
-          : int.tryParse('$rawTimestamp');
-      final hasValidTimestamp = _isValidGatewayTimestamp(timestampSeconds);
-        final ts = hasValidTimestamp
-          ? _resolveGatewayTimestamp(timestampSeconds, fallback: importedAtDt)
-          : importedAtDt.add(Duration(seconds: rowIndex));
-
-      final timestampIso = ts.toIso8601String();
-      final masterIdKey = (masterId != null && masterId > 0) ? masterId : 0;
-      final dupKey = '$tagId|$masterIdKey|$timestampIso';
-
-      final existing = dupMap[dupKey];
-      if (existing != null) {
-        // Tieni quello con GPS valido, oppure RSSI migliore se entrambi no-GPS
-        final existingGpsValid = (existing['gps_valid'] == true) ||
-            (existing['gps_valid'] == 1) ||
-            (existing['gps_valid'] == '1');
-        if (!existingGpsValid && gpsValid) {
-          // Nuovo record ha GPS e il vecchio no, sostituisci
-          dupMap[dupKey] = {
-            'tag_id': tagId,
-            'master_id': masterIdKey,
-            'timestamp': timestampIso,
-            'latitude': latitude,
-            'longitude': longitude,
-            'gps_valid': gpsValid,
-            'battery_pct': batteryPct,
-            'temperature': temperature,
-            'rssi': rssi,
-          };
-        } else if (existingGpsValid == gpsValid) {
-          // Stessa condizione GPS: tieni il RSSI migliore
-          final existingRssi = (existing['rssi'] as int?) ?? -999;
-          if (rssi > existingRssi) {
-            dupMap[dupKey] = {
-              'tag_id': tagId,
-              'master_id': masterIdKey,
-              'timestamp': timestampIso,
-              'latitude': latitude,
-              'longitude': longitude,
-              'gps_valid': gpsValid,
-              'battery_pct': batteryPct,
-              'temperature': temperature,
-              'rssi': rssi,
-            };
-          }
-        }
-      } else {
-        // Primo record per questa key
-        dupMap[dupKey] = {
-          'tag_id': tagId,
-          'master_id': masterIdKey,
-          'timestamp': timestampIso,
-          'latitude': latitude,
-          'longitude': longitude,
-          'gps_valid': gpsValid,
-          'battery_pct': batteryPct,
-          'temperature': temperature,
-          'rssi': rssi,
-        };
-      }
-    }
-
-    // Ora salva solo i record deduplicati, controllando anche il DB per non reimportare vecchi eventi
-    for (final rec in dupMap.values) {
-      final tagId = rec['tag_id'] as int;
-      final masterIdKey = rec['master_id'] as int;
-      final timestampIso = rec['timestamp'] as String;
-      final latitude = rec['latitude'] as double?;
-      final longitude = rec['longitude'] as double?;
-      final gpsValid = rec['gps_valid'] as bool;
-      final batteryPct = rec['battery_pct'] as int;
-      final temperature = rec['temperature'] as int;
-      final rssi = rec['rssi'] as int;
-
-      // Controlla se esiste già nel DB
-      final existing = await db.query(
-        'storico',
-        columns: ['id'],
-        where: 'tag_id = ? AND COALESCE(master_id, 0) = ? AND timestamp = ?',
-        whereArgs: [tagId, masterIdKey, timestampIso],
-        limit: 1,
+      final ts = DateTime.fromMillisecondsSinceEpoch(
+        (r['timestamp'] as int) * 1000,
       );
-      if (existing.isNotEmpty) continue;
-
       await db.insert('storico', {
-        'tag_id': tagId,
-        'master_id': (masterIdKey > 0) ? masterIdKey : null,
-        'timestamp': timestampIso,
+        'tag_id': normalizedTagId,
+        'master_id': (masterId != null && masterId > 0) ? masterId : null,
+        'timestamp': ts.toIso8601String(),
         'imported_at': importedAt,
-        'latitude': latitude,
-        'longitude': longitude,
-        'gps_valid': gpsValid ? 1 : 0,
+        'latitude': r['latitude'],
+        'longitude': r['longitude'],
+        'gps_valid': (r['gps_valid'] == true) ? 1 : 0,
+        'no_tag_seen': noTagSeen ? 1 : 0,
+        'wake_del_ciclo': _asInt(r['wake_del_ciclo']) ?? 0,
         'boot_count': 0,
-        'battery_pct': batteryPct,
+        'battery_pct': r['battery_pct'],
         'battery_mv': 0,
-        'temperature': temperature,
-        'rssi': rssi,
+        'temperature': r['temperature'],
+        'rssi': r['rssi'],
       });
     }
   }
 
-  DateTime _resolveGatewayTimestamp(
-    int? raw,
-    {required DateTime fallback}
-  ) {
-    if (raw == null || raw <= 0) return fallback;
-
-    DateTime ts;
-    if (raw >= 1000000000000) {
-      // Alcuni firmware possono inviare millisecondi già pronti.
-      ts = DateTime.fromMillisecondsSinceEpoch(raw);
-    } else {
-      ts = DateTime.fromMillisecondsSinceEpoch(raw * 1000);
-    }
-
-    final epochSeconds = ts.millisecondsSinceEpoch ~/ 1000;
-    if (epochSeconds < _minPlausibleEpochSeconds ||
-        epochSeconds > _maxPlausibleEpochSeconds) {
-      return fallback;
-    }
-
-    return ts;
-  }
-
-  bool _isValidGatewayTimestamp(int? raw) {
-    if (raw == null || raw <= 0) return false;
-
-    final ts = raw >= 1000000000000
-        ? DateTime.fromMillisecondsSinceEpoch(raw)
-        : DateTime.fromMillisecondsSinceEpoch(raw * 1000);
-    final epochSeconds = ts.millisecondsSinceEpoch ~/ 1000;
-    return epochSeconds >= _minPlausibleEpochSeconds &&
-        epochSeconds <= _maxPlausibleEpochSeconds;
+  int? _asInt(Object? raw) {
+    if (raw is int) return raw;
+    return int.tryParse('$raw');
   }
 
   Future<Map<int, int>> getUltimoMasterPerSlave() async {
     final db = await database;
     final rows = await db.rawQuery('''
-      SELECT id, tag_id, master_id, rssi, imported_at, timestamp, gps_valid
+      SELECT
+        id,
+        tag_id,
+        master_id,
+        rssi,
+        imported_at,
+        timestamp,
+        gps_valid,
+        COALESCE(no_tag_seen, 0) AS no_tag_seen
       FROM storico
-      WHERE master_id IS NOT NULL AND master_id > 0
+      WHERE
+        master_id IS NOT NULL
+        AND master_id > 0
+        AND tag_id > 0
+        AND COALESCE(no_tag_seen, 0) = 0
       ORDER BY
         tag_id ASC,
         COALESCE(imported_at, timestamp) DESC,

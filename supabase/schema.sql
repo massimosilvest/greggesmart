@@ -34,6 +34,8 @@ create table if not exists public.app_storico (
   latitude double precision,
   longitude double precision,
   gps_valid integer,
+  no_tag_seen integer,
+  wake_del_ciclo integer,
   boot_count integer not null,
   battery_pct integer not null,
   battery_mv integer not null,
